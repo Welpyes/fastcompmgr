@@ -160,6 +160,34 @@ int render_event, render_error;
 Bool synchronize;
 int composite_opcode;
 static Bool g_paint_ignore_region_is_dirty = True;
+static Bool is_awesomewm = False;
+
+static void
+check_is_awesomewm(Display *dpy) {
+    Atom net_supporting_wm_check_atom = XInternAtom(dpy, "_NET_SUPPORTING_WM_CHECK", False);
+    Atom net_wm_name_atom = XInternAtom(dpy, "_NET_WM_NAME", False);
+    Atom utf8_string_atom = XInternAtom(dpy, "UTF8_STRING", False);
+    Window root = DefaultRootWindow(dpy);
+    Window *supporting_wm_win = NULL;
+    unsigned char *wm_name = NULL;
+    Atom actual_type;
+    int actual_format;
+    unsigned long nitems, bytes_after;
+
+    if (XGetWindowProperty(dpy, root, net_supporting_wm_check_atom, 0, 1, False, XA_WINDOW,
+                           &actual_type, &actual_format, &nitems, &bytes_after,
+                           (unsigned char **)&supporting_wm_win) == Success && supporting_wm_win) {
+        if (XGetWindowProperty(dpy, *supporting_wm_win, net_wm_name_atom, 0, 1024, False, utf8_string_atom,
+                               &actual_type, &actual_format, &nitems, &bytes_after,
+                               &wm_name) == Success && wm_name) {
+            if (strcmp((char *)wm_name, "awesome") == 0) {
+                is_awesomewm = True;
+            }
+            XFree(wm_name);
+        }
+        XFree(supporting_wm_win);
+    }
+}
 
 Atom win_type[NUM_WINTYPES];
 double win_type_opacity[NUM_WINTYPES];
@@ -822,25 +850,8 @@ win_extents(Display *dpy, win *w) {
     // See also: https://github.com/regolith-linux/regolith-compositor-compton-glx/issues/3
     bool shadow_yes = (likely(w->window_type)
       && win_type_shadow[w->window_type] &&
-      (! w->a.override_redirect || w->window_type != WINTYPE_NORMAL) &&
+      (is_awesomewm || !w->a.override_redirect || w->window_type != WINTYPE_NORMAL) &&
       ! is_gtk_frame_extent(dpy, w->id));
-    // Firefox's bookmark-dragging renders a large ugly shadow. Since these as
-    // well as Tab-popups are ARGB-windows, stay safe and only draw shadows on
-    // non-solid windows for types normal/dialog . Note that apparently Compiz
-    // does not draw shadows on any ARGB windows, so nothing unusual here. See
-    // also https://github.com/chjj/compton/issues/201
-    // Since we have the -C flag to control for shadows on panels/docks, respect
-    // this setting by below WINTYPE_DOCK (and above win_type_shadow[])
-    if (w->mode != WINDOW_SOLID ) {
-      switch(w->window_type){
-      case WINTYPE_NORMAL:
-      case WINTYPE_DIALOG:
-      case WINTYPE_DOCK:
-        shadow_yes = shadow_yes && true; break;
-      default:
-        shadow_yes = false;
-      }
-    }
     w->shadow_type = (shadow_yes) ? SHADOW_YES : SHADOW_NO;
   }
 
@@ -2463,6 +2474,8 @@ main(int argc, char **argv) {
     exit(1);
   }
   g_dpy = dpy;
+
+  check_is_awesomewm(dpy);
 
   XSetErrorHandler(error);
   if (synchronize) {
