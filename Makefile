@@ -3,7 +3,6 @@ LIBS = `pkg-config --libs ${PACKAGES}` -lm
 INCS = `pkg-config --cflags ${PACKAGES}`
 CFLAGS = -Wall -O3 -flto
 PREFIX = /usr/local
-MANDIR = ${PREFIX}/share/man/man1
 
 OBJS=fastcompmgr.o comp_rect.o cm-root.o cm-global.o cm-util.o
 

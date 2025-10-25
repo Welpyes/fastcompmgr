@@ -37,7 +37,7 @@
 
 #define likely(x)       __builtin_expect(!!(x), 1)
 #define unlikely(x)     __builtin_expect(!!(x), 0)
-
+#define ulong unsigned long
 
 #if COMPOSITE_MAJOR > 0 || COMPOSITE_MINOR >= 2
 #define HAS_NAME_WINDOW_PIXMAP 1
