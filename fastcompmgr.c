@@ -127,6 +127,7 @@ typedef struct _win {
   /* for drawing translucent windows */
   XserverRegion border_clip;
   struct _win *prev_trans;
+  Bool is_rofi;
 } win;
 
 typedef struct _conv {
@@ -1193,7 +1194,12 @@ paint_all(Display *dpy, XserverRegion region) {
     XFixesSetPictureClipRegion(dpy,
       root_buffer, 0, 0, w->border_clip);
 
-    if (g_blur_root_pict != None) {
+    if (g_blur_root_pict != None && !w->is_rofi &&
+        w->window_type != WINTYPE_MENU &&
+        w->window_type != WINTYPE_DROPDOWN_MENU &&
+        w->window_type != WINTYPE_POPUP_MENU &&
+        w->window_type != WINTYPE_TOOLTIP &&
+        w->window_type != WINTYPE_NOTIFY) {
         XRenderComposite(dpy, PictOpSrc, g_blur_root_pict, None, root_buffer,
                          w->a.x, w->a.y, 0, 0, w->a.x, w->a.y, w->a.width, w->a.height);
     }
@@ -1688,6 +1694,50 @@ set_opacity(Display *dpy, win *w, unsigned long opacity) {
   set_paint_ignore_region_dirty();
 }
 
+static Bool
+is_rofi_window(Display *dpy, Window w) {
+    Window root_return, parent_return;
+    Window *children_return;
+    unsigned int nchildren_return;
+    Window current_w = w;
+
+    while (True) {
+        XClassHint class_hint;
+        fprintf(stderr, "debug: checking window 0x%lx for rofi\n", current_w);
+        if (XGetClassHint(dpy, current_w, &class_hint)) {
+            fprintf(stderr, "debug: res_name: %s, res_class: %s\n", class_hint.res_name, class_hint.res_class);
+            if (class_hint.res_name && strcmp(class_hint.res_name, "rofi") == 0) {
+                fprintf(stderr, "debug: rofi found by res_name\n");
+                XFree(class_hint.res_name);
+                XFree(class_hint.res_class);
+                return True;
+            }
+            if (class_hint.res_class && strcmp(class_hint.res_class, "Rofi") == 0) {
+                fprintf(stderr, "debug: rofi found by res_class\n");
+                XFree(class_hint.res_name);
+                XFree(class_hint.res_class);
+                return True;
+            }
+            XFree(class_hint.res_name);
+            XFree(class_hint.res_class);
+        } else {
+            fprintf(stderr, "debug: XGetClassHint failed for window 0x%lx\n", current_w);
+        }
+
+        if (!XQueryTree(dpy, current_w, &root_return, &parent_return, &children_return, &nchildren_return)) {
+            break;
+        }
+        if (children_return) {
+            XFree(children_return);
+        }
+        if (parent_return == root_return || parent_return == None) {
+            break;
+        }
+        current_w = parent_return;
+    }
+    return False;
+}
+
 static void
 add_win(Display *dpy, Window id, Window prev) {
   win *new = calloc(1, sizeof(win));
@@ -1758,6 +1808,8 @@ add_win(Display *dpy, Window id, Window prev) {
   get_frame_extents(dpy, id,
     &new->left_width, &new->right_width,
     &new->top_width, &new->bottom_width);
+
+  new->is_rofi = is_rofi_window(dpy, id);
 
   new->next = *p;
   *p = new;
