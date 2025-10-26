@@ -28,6 +28,7 @@
 #include <X11/extensions/Xcomposite.h>
 #include <X11/extensions/Xdamage.h>
 #include <X11/extensions/Xrender.h>
+#include <png.h>
 
 #include "cm-global.h"
 #include "cm-root.h"
@@ -44,6 +45,12 @@
 #endif
 
 #define CAN_DO_USABLE 0
+
+//- FAKE TRANSPARENCY
+static char* g_temp_path = NULL;
+static Picture g_blur_root_pict = None;
+//
+
 
 typedef enum {
   WINTYPE_UNKNOWN, // MUST ALWAYS STAY first, due to init optimization in add_win
@@ -225,6 +232,9 @@ static void
 do_configure_win(Display *dpy, win* w);
 static void
 set_paint_ignore_region_dirty(void);
+
+static Picture
+load_png_to_picture(const char* path, int screen_width, int screen_height);
 
 static XserverRegion
 win_extents(Display *dpy, win *w);
@@ -1182,6 +1192,11 @@ paint_all(Display *dpy, XserverRegion region) {
   for (w = t; w; w = w->prev_trans) {
     XFixesSetPictureClipRegion(dpy,
       root_buffer, 0, 0, w->border_clip);
+
+    if (g_blur_root_pict != None) {
+        XRenderComposite(dpy, PictOpSrc, g_blur_root_pict, None, root_buffer,
+                         w->a.x, w->a.y, 0, 0, w->a.x, w->a.y, w->a.width, w->a.height);
+    }
 
     if(w->shadow_type == SHADOW_YES) {
       XRenderComposite(
@@ -2228,7 +2243,11 @@ usage(char *program, int exitcode) {
     --shadow-green value
     Green color value of shadow (0.0 - 1.0, defaults to 0).
     --shadow-blue value
-    Blue color value of shadow (0.0 - 1.0, defaults to 0).)SOMERANDOMTEXT"
+    Blue color value of shadow (0.0 - 1.0, defaults to 0).
+    --fake-blur path/to/file
+    Use a blurred image as the background for transparent windows.
+    --blur-sigma value
+    The sigma value for the gaussian blur. (default 5.0).)SOMERANDOMTEXT"
   );
   fprintf(stderr, "\n");
 
@@ -2335,6 +2354,100 @@ check_paint(Display *dpy){
   }
 }
 
+static Picture
+load_png_to_picture(const char* path, int screen_width, int screen_height) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        fprintf(stderr, "error: could not open png file %s\n", path);
+        return None;
+    }
+
+    png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if (!png) {
+        fclose(fp);
+        return None;
+    }
+
+    png_infop info = png_create_info_struct(png);
+    if (!info) {
+        png_destroy_read_struct(&png, NULL, NULL);
+        fclose(fp);
+        return None;
+    }
+
+    if (setjmp(png_jmpbuf(png))) {
+        png_destroy_read_struct(&png, &info, NULL);
+        fclose(fp);
+        return None;
+    }
+
+    png_init_io(png, fp);
+    png_read_info(png, info);
+
+    int width = png_get_image_width(png, info);
+    int height = png_get_image_height(png, info);
+    png_byte color_type = png_get_color_type(png, info);
+    png_byte bit_depth = png_get_bit_depth(png, info);
+
+    if (bit_depth == 16)
+        png_set_strip_16(png);
+
+    if (color_type == PNG_COLOR_TYPE_PALETTE)
+        png_set_palette_to_rgb(png);
+
+    if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8)
+        png_set_expand_gray_1_2_4_to_8(png);
+
+    if (png_get_valid(png, info, PNG_INFO_tRNS))
+        png_set_tRNS_to_alpha(png);
+
+    if (color_type == PNG_COLOR_TYPE_RGB ||
+        color_type == PNG_COLOR_TYPE_GRAY ||
+        color_type == PNG_COLOR_TYPE_PALETTE)
+        png_set_filler(png, 0xFF, PNG_FILLER_AFTER);
+
+    if (color_type == PNG_COLOR_TYPE_GRAY ||
+        color_type == PNG_COLOR_TYPE_GRAY_ALPHA)
+        png_set_gray_to_rgb(png);
+
+    png_read_update_info(png, info);
+
+    png_bytep *row_pointers = (png_bytep*) malloc(sizeof(png_bytep) * height);
+    for (int y = 0; y < height; y++) {
+        row_pointers[y] = (png_byte*) malloc(png_get_rowbytes(png,info));
+    }
+
+    png_read_image(png, row_pointers);
+
+    fclose(fp);
+
+    XImage *ximage = XCreateImage(dpy, DefaultVisual(dpy, g_screen), 32, ZPixmap, 0, (char*)malloc(width * height * 4), width, height, 32, 0);
+    for (int y = 0; y < height; y++) {
+        png_bytep row = row_pointers[y];
+        for (int x = 0; x < width; x++) {
+            png_bytep px = &(row[x * 4]);
+            char r = px[0];
+            px[0] = px[2];
+            px[2] = r;
+        }
+        memcpy(ximage->data + y * ximage->bytes_per_line, row_pointers[y], png_get_rowbytes(png, info));
+        free(row_pointers[y]);
+    }
+    free(row_pointers);
+
+    Pixmap pixmap = XCreatePixmap(dpy, root, width, height, 32);
+    Picture picture = XRenderCreatePicture(dpy, pixmap, XRenderFindStandardFormat(dpy, PictStandardARGB32), 0, NULL);
+
+    GC gc = XCreateGC(dpy, pixmap, 0, NULL);
+    XPutImage(dpy, pixmap, gc, ximage, 0, 0, 0, 0, width, height);
+
+    XFreeGC(dpy, gc);
+    XDestroyImage(ximage);
+    png_destroy_read_struct(&png, &info, NULL);
+
+    return picture;
+}
+
 
 int
 main(int argc, char **argv) {
@@ -2343,6 +2456,8 @@ main(int argc, char **argv) {
     { "shadow-green", required_argument, NULL, 0 },
     { "shadow-blue", required_argument, NULL, 0 },
     { "help", no_argument, NULL, 0 },
+    { "fake-blur", required_argument, NULL, 0 },
+    { "blur-sigma", required_argument, NULL, 0 },
     { 0, 0, 0, 0 },
   };
 
@@ -2361,6 +2476,8 @@ main(int argc, char **argv) {
   double shadow_green = 0.0;
   double shadow_blue = 0.0;
   char *display = 0;
+  char *fake_blur_path = NULL;
+  double blur_sigma = 5.0;
   int o;
   int longopt_idx;
   Bool no_dock_shadow = False;
@@ -2382,6 +2499,8 @@ main(int argc, char **argv) {
           case 1: shadow_green = normalize_d(atof(optarg)); break;
           case 2: shadow_blue = normalize_d(atof(optarg)); break;
           case 3: usage(argv[0], 0); break;
+          case 4: fake_blur_path = optarg; break;
+          case 5: blur_sigma = atof(optarg); break;
           default:
             fprintf(stderr, "Bug, unhandeled longopt_idx %d\n", longopt_idx);
             exit(2);
@@ -2564,6 +2683,38 @@ main(int argc, char **argv) {
 
   if(!root_init()){
     exit(1);
+  }
+
+  if (fake_blur_path) {
+    char template[1024];
+    char *tmpdir = getenv("TMPDIR");
+    if (!tmpdir) {
+      tmpdir = "/tmp";
+    }
+    sprintf(template, "%s/fastcompmgr-XXXXXX", tmpdir);
+    int fd = mkstemp(template);
+    if (fd != -1) {
+      close(fd);
+      char png_path[1024];
+      snprintf(png_path, sizeof(png_path), "%s.png", template);
+      if (rename(template, png_path) == 0) {
+        g_temp_path = strdup(png_path);
+        char cmd[4096];
+        fprintf(stderr, "debug: TMPDIR is %s\n", tmpdir);
+        fprintf(stderr, "debug: temporary path is %s\n", g_temp_path);
+        snprintf(cmd, sizeof(cmd),
+          "ffmpeg -i \"%s\" -vf \"gblur=sigma=%.2f,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,format=rgba\" -y -frames:v 1 \"%s\"",
+          fake_blur_path, blur_sigma, root_width, root_height, root_width, root_height, g_temp_path);
+        fprintf(stderr, "debug: ffmpeg command: %s\n", cmd);
+        if (system(cmd) == 0) {
+          g_blur_root_pict = load_png_to_picture(g_temp_path, root_width, root_height);
+        } else {
+          fprintf(stderr, "error: ffmpeg command failed\n");
+        }
+      } else {
+          unlink(template);
+      }
+    }
   }
 
   black_picture = solid_picture(dpy, True, 1, 0, 0, 0);
@@ -2754,5 +2905,9 @@ main(int argc, char **argv) {
     } while (QLength(dpy));
 
     check_paint(dpy);
+  }
+  if (g_temp_path) {
+    unlink(g_temp_path);
+    free(g_temp_path);
   }
 }

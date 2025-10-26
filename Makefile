@@ -1,4 +1,4 @@
-PACKAGES = x11 xcomposite xfixes xdamage xrender
+PACKAGES = x11 xcomposite xfixes xdamage xrender libpng
 LIBS = `pkg-config --libs ${PACKAGES}` -lm
 INCS = `pkg-config --cflags ${PACKAGES}`
 CFLAGS = -Wall -O3 -flto
