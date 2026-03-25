@@ -5,7 +5,7 @@
 #include "cm-util.h"
 
 #include "ringbuffer.h"
-
+#define ulong unsigned long
 
 ringBuffer_typedef(ulong, IgnoreErrRingbuf);
 static IgnoreErrRingbuf ignore_ringbuf;
