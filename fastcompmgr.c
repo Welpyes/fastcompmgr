@@ -699,7 +699,7 @@ win_extents(Display *dpy, win *w) {
     // See also: https://github.com/regolith-linux/regolith-compositor-compton-glx/issues/3
     bool shadow_yes = (likely(w->window_type)
       && win_type_shadow[w->window_type] &&
-      (! w->a.override_redirect || w->window_type != WINTYPE_NORMAL) &&
+      // (! w->a.override_redirect || w->window_type != WINTYPE_NORMAL) &&
       ! is_gtk_frame_extent(dpy, w->id));
     // Firefox's bookmark-dragging renders a large ugly shadow. Since these as
     // well as Tab-popups are ARGB-windows, stay safe and only draw shadows on
