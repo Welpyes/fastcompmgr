@@ -33,3 +33,5 @@ static inline double normalize_d(double d) {
   return d;
 }
 
+bool parse_hex_color(const char *str, double *r, double *g, double *b);
+

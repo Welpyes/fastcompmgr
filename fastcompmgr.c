@@ -2157,12 +2157,8 @@ usage(char *program, int exitcode) {
     Opacity of window titlebars and borders. (0.1 - 1.0)
     -S
     Enable synchronous operation (for debugging).
-    --shadow-red value
-    Red color value of shadow (0.0 - 1.0, defaults to 0).
-    --shadow-green value
-    Green color value of shadow (0.0 - 1.0, defaults to 0).
-    --shadow-blue value
-    Blue color value of shadow (0.0 - 1.0, defaults to 0).)SOMERANDOMTEXT"
+    --shadow-color "#RRGGBB"
+    Hex color value of shadow (defaults to #000000).)SOMERANDOMTEXT"
   );
   fprintf(stderr, "\n");
 
@@ -2273,9 +2269,7 @@ check_paint(Display *dpy){
 int
 main(int argc, char **argv) {
   const static struct option longopt[] = {
-    { "shadow-red", required_argument, NULL, 0 },
-    { "shadow-green", required_argument, NULL, 0 },
-    { "shadow-blue", required_argument, NULL, 0 },
+    { "shadow-color", required_argument, NULL, 0 },
     { "help", no_argument, NULL, 0 },
     { 0, 0, 0, 0 },
   };
@@ -2314,10 +2308,13 @@ main(int argc, char **argv) {
        // Long options
       case 0:
         switch (longopt_idx) {
-          case 0: shadow_red = normalize_d(atof(optarg)); break;
-          case 1: shadow_green = normalize_d(atof(optarg)); break;
-          case 2: shadow_blue = normalize_d(atof(optarg)); break;
-          case 3: usage(argv[0], 0); break;
+          case 0:
+            if (!parse_hex_color(optarg, &shadow_red, &shadow_green, &shadow_blue)) {
+              fprintf(stderr, "Invalid shadow color format: %s. Use #RRGGBB\n", optarg);
+              exit(1);
+            }
+            break;
+          case 1: usage(argv[0], 0); break;
           default:
             fprintf(stderr, "Bug, unhandeled longopt_idx %d\n", longopt_idx);
             exit(2);
