@@ -134,11 +134,14 @@ double inactive_opacity = 0;
 double frame_opacity = 0;
 int corner_radius = 0;
 Picture corner_mask = None;
+static Picture corner_masks[4] = {None, None, None, None};
+static Picture border_masks[4] = {None, None, None, None};
 static Picture corner_alpha_mask = None;
 static int corner_alpha_mask_size = 0;
 static Picture border_mask = None;
 static Picture border_picture = None;
 static Picture active_border_picture = None;
+static XRenderColor border_color_x, active_border_color_x;
 static double border_red = 0.5, border_green = 0.0, border_blue = 0.5;
 static double active_border_red = 0.5, active_border_green = 0.0, active_border_blue = 0.5;
 static Window active_win = None;
@@ -959,58 +962,31 @@ draw_rounded_part(Display *dpy, int op, Picture src, Picture mask, Picture dst,
 
 static void
 draw_border_overlay(Display *dpy, win *w, Picture dst, int x, int y, int wid, int hei) {
-  if (border_mask == None) return;
+  if (border_masks[0] == None) return;
 
-  Picture border_src = (w->id == active_win) ? active_border_picture : border_picture;
-  if (border_src == None) border_src = border_picture;
+  bool is_active = (w->id == active_win);
+  Picture border_src = is_active ? active_border_picture : border_picture;
+  XRenderColor *color_src = is_active ? &active_border_color_x : &border_color_x;
+  
   if (border_src == None) return;
 
   int size = corner_radius;
   int b_width = 2;
-  XTransform xform = {{
-    { XDoubleToFixed(1), 0, 0 },
-    { 0, XDoubleToFixed(1), 0 },
-    { 0, 0, XDoubleToFixed(1) }
-  }};
 
-  /* 4 Straight edges */
-  XRenderComposite(dpy, PictOpOver, border_src, None, dst, 0, 0, 0, 0, x + size, y, wid - size * 2, b_width);
-  XRenderComposite(dpy, PictOpOver, border_src, None, dst, 0, 0, 0, 0, x + size, y + hei - b_width, wid - size * 2, b_width);
-  XRenderComposite(dpy, PictOpOver, border_src, None, dst, 0, 0, 0, 0, x, y + size, b_width, hei - size * 2);
-  XRenderComposite(dpy, PictOpOver, border_src, None, dst, 0, 0, 0, 0, x + wid - b_width, y + size, b_width, hei - size * 2);
+  /* Batch 4 Straight edges into one GPU command */
+  XRectangle rects[4] = {
+    { x + size, y, wid - size * 2, b_width }, /* Top */
+    { x + size, y + hei - b_width, wid - size * 2, b_width }, /* Bottom */
+    { x, y + size, b_width, hei - size * 2 }, /* Left */
+    { x + wid - b_width, y + size, b_width, hei - size * 2 } /* Right */
+  };
+  XRenderFillRectangles(dpy, PictOpOver, dst, color_src, rects, 4);
 
-  /* 4 Corners */
-  /* Top-left */
-  xform.matrix[0][0] = XDoubleToFixed(1);
-  xform.matrix[1][1] = XDoubleToFixed(1);
-  xform.matrix[0][2] = 0;
-  xform.matrix[1][2] = 0;
-  XRenderSetPictureTransform(dpy, border_mask, &xform);
-  XRenderComposite(dpy, PictOpOver, border_src, border_mask, dst, 0, 0, 0, 0, x, y, size, size);
-
-  /* Top-right */
-  xform.matrix[0][0] = XDoubleToFixed(-1);
-  xform.matrix[1][1] = XDoubleToFixed(1);
-  xform.matrix[0][2] = XDoubleToFixed(size);
-  xform.matrix[1][2] = 0;
-  XRenderSetPictureTransform(dpy, border_mask, &xform);
-  XRenderComposite(dpy, PictOpOver, border_src, border_mask, dst, 0, 0, 0, 0, x + wid - size, y, size, size);
-
-  /* Bottom-left */
-  xform.matrix[0][0] = XDoubleToFixed(1);
-  xform.matrix[1][1] = XDoubleToFixed(-1);
-  xform.matrix[0][2] = 0;
-  xform.matrix[1][2] = XDoubleToFixed(size);
-  XRenderSetPictureTransform(dpy, border_mask, &xform);
-  XRenderComposite(dpy, PictOpOver, border_src, border_mask, dst, 0, 0, 0, 0, x, y + hei - size, size, size);
-
-  /* Bottom-right */
-  xform.matrix[0][0] = XDoubleToFixed(-1);
-  xform.matrix[1][1] = XDoubleToFixed(-1);
-  xform.matrix[0][2] = XDoubleToFixed(size);
-  xform.matrix[1][2] = XDoubleToFixed(size);
-  XRenderSetPictureTransform(dpy, border_mask, &xform);
-  XRenderComposite(dpy, PictOpOver, border_src, border_mask, dst, 0, 0, 0, 0, x + wid - size, y + hei - size, size, size);
+  /* 4 Corners using transform cache (no XRenderSetPictureTransform) */
+  XRenderComposite(dpy, PictOpOver, border_src, border_masks[0], dst, 0, 0, 0, 0, x, y, size, size);
+  XRenderComposite(dpy, PictOpOver, border_src, border_masks[1], dst, 0, 0, 0, 0, x + wid - size, y, size, size);
+  XRenderComposite(dpy, PictOpOver, border_src, border_masks[2], dst, 0, 0, 0, 0, x, y + hei - size, size, size);
+  XRenderComposite(dpy, PictOpOver, border_src, border_masks[3], dst, 0, 0, 0, 0, x + wid - size, y + hei - size, size, size);
 }
 
 static void
@@ -1040,15 +1016,14 @@ draw_rounded_window(Display *dpy, int op, win *w, Picture alpha, Picture dst,
   /* Bottom strip */
   draw_rounded_part(dpy, op, w->picture, alpha, dst, size, hei - size, 0, 0, x + size, y + hei - size, wid - size * 2, size);
 
-  /* 4 Corners */
-  XTransform xform = {{
-    { XDoubleToFixed(1), 0, 0 },
-    { 0, XDoubleToFixed(1), 0 },
-    { 0, 0, XDoubleToFixed(1) }
-  }};
-
-  Picture m = corner_mask;
-  if (alpha != None) {
+  /* 4 Corners using transform cache */
+  if (alpha == None) {
+    XRenderComposite(dpy, op, w->picture, corner_masks[0], dst, 0, 0, 0, 0, x, y, size, size);
+    XRenderComposite(dpy, op, w->picture, corner_masks[1], dst, wid - size, 0, 0, 0, x + wid - size, y, size, size);
+    XRenderComposite(dpy, op, w->picture, corner_masks[2], dst, 0, hei - size, 0, 0, x, y + hei - size, size, size);
+    XRenderComposite(dpy, op, w->picture, corner_masks[3], dst, wid - size, hei - size, 0, 0, x + wid - size, y + hei - size, size, size);
+  } else {
+    /* Fallback to dynamic caching for translucent windows (requires alpha combination) */
     if (unlikely(corner_alpha_mask == None || corner_alpha_mask_size != corner_radius)) {
       if (corner_alpha_mask) XRenderFreePicture(dpy, corner_alpha_mask);
       int csize = corner_radius;
@@ -1061,42 +1036,36 @@ draw_rounded_window(Display *dpy, int op, win *w, Picture alpha, Picture dst,
       XFreePixmap(dpy, pix);
       corner_alpha_mask_size = corner_radius;
     }
-    /* Combine corner_mask with alpha into the cached mask */
-    XRenderComposite(dpy, PictOpSrc, corner_mask, alpha, corner_alpha_mask, 0, 0, 0, 0, 0, 0, corner_alpha_mask_size, corner_alpha_mask_size);
-    m = corner_alpha_mask;
+    
+    XTransform xform = {{{ XDoubleToFixed(1), 0, 0 }, { 0, XDoubleToFixed(1), 0 }, { 0, 0, XDoubleToFixed(1) }}};
+
+    /* Top-left */
+    XRenderComposite(dpy, PictOpSrc, corner_mask, alpha, corner_alpha_mask, 0, 0, 0, 0, 0, 0, size, size);
+    XRenderSetPictureTransform(dpy, corner_alpha_mask, &xform);
+    XRenderComposite(dpy, op, w->picture, corner_alpha_mask, dst, 0, 0, 0, 0, x, y, size, size);
+
+    /* Top-right */
+    xform.matrix[0][0] = XDoubleToFixed(-1);
+    xform.matrix[0][2] = XDoubleToFixed(size);
+    XRenderSetPictureTransform(dpy, corner_alpha_mask, &xform);
+    XRenderComposite(dpy, op, w->picture, corner_alpha_mask, dst, wid - size, 0, 0, 0, x + wid - size, y, size, size);
+
+    /* Bottom-left */
+    xform.matrix[0][0] = XDoubleToFixed(1);
+    xform.matrix[0][2] = 0;
+    xform.matrix[1][1] = XDoubleToFixed(-1);
+    xform.matrix[1][2] = XDoubleToFixed(size);
+    XRenderSetPictureTransform(dpy, corner_alpha_mask, &xform);
+    XRenderComposite(dpy, op, w->picture, corner_alpha_mask, dst, 0, hei - size, 0, 0, x, y + hei - size, size, size);
+
+    /* Bottom-right */
+    xform.matrix[0][0] = XDoubleToFixed(-1);
+    xform.matrix[0][2] = XDoubleToFixed(size);
+    xform.matrix[1][1] = XDoubleToFixed(-1);
+    xform.matrix[1][2] = XDoubleToFixed(size);
+    XRenderSetPictureTransform(dpy, corner_alpha_mask, &xform);
+    XRenderComposite(dpy, op, w->picture, corner_alpha_mask, dst, wid - size, hei - size, 0, 0, x + wid - size, y + hei - size, size, size);
   }
-
-  /* Top-left */
-  xform.matrix[0][0] = XDoubleToFixed(1);
-  xform.matrix[1][1] = XDoubleToFixed(1);
-  xform.matrix[0][2] = 0;
-  xform.matrix[1][2] = 0;
-  XRenderSetPictureTransform(dpy, m, &xform);
-  XRenderComposite(dpy, op, w->picture, m, dst, 0, 0, 0, 0, x, y, size, size);
-
-  /* Top-right */
-  xform.matrix[0][0] = XDoubleToFixed(-1);
-  xform.matrix[1][1] = XDoubleToFixed(1);
-  xform.matrix[0][2] = XDoubleToFixed(size);
-  xform.matrix[1][2] = 0;
-  XRenderSetPictureTransform(dpy, m, &xform);
-  XRenderComposite(dpy, op, w->picture, m, dst, wid - size, 0, 0, 0, x + wid - size, y, size, size);
-
-  /* Bottom-left */
-  xform.matrix[0][0] = XDoubleToFixed(1);
-  xform.matrix[1][1] = XDoubleToFixed(-1);
-  xform.matrix[0][2] = 0;
-  xform.matrix[1][2] = XDoubleToFixed(size);
-  XRenderSetPictureTransform(dpy, m, &xform);
-  XRenderComposite(dpy, op, w->picture, m, dst, 0, hei - size, 0, 0, x, y + hei - size, size, size);
-
-  /* Bottom-right */
-  xform.matrix[0][0] = XDoubleToFixed(-1);
-  xform.matrix[1][1] = XDoubleToFixed(-1);
-  xform.matrix[0][2] = XDoubleToFixed(size);
-  xform.matrix[1][2] = XDoubleToFixed(size);
-  XRenderSetPictureTransform(dpy, m, &xform);
-  XRenderComposite(dpy, op, w->picture, m, dst, wid - size, hei - size, 0, 0, x + wid - size, y + hei - size, size, size);
 
   draw_border_overlay(dpy, w, dst, x, y, wid, hei);
 }
@@ -2691,6 +2660,16 @@ main(int argc, char **argv) {
   border_picture = solid_picture(dpy, True, 1, border_red, border_green, border_blue);
   active_border_picture = solid_picture(dpy, True, 1, active_border_red, active_border_green, active_border_blue);
 
+  border_color_x.alpha = 0xffff;
+  border_color_x.red = border_red * 0xffff;
+  border_color_x.green = border_green * 0xffff;
+  border_color_x.blue = border_blue * 0xffff;
+
+  active_border_color_x.alpha = 0xffff;
+  active_border_color_x.red = active_border_red * 0xffff;
+  active_border_color_x.green = active_border_green * 0xffff;
+  active_border_color_x.blue = active_border_blue * 0xffff;
+
   if (!black_picture || !border_picture || !active_border_picture) {
     fprintf(stderr, "Error: Failed to create solid color pictures\n");
     exit(1);
@@ -2755,6 +2734,22 @@ main(int argc, char **argv) {
         }
       }
     }
+
+    /* Initialize 4-way mask cache to avoid per-window transforms */
+    XTransform xforms[4] = {
+      {{{ XDoubleToFixed(1), 0, 0 }, { 0, XDoubleToFixed(1), 0 }, { 0, 0, XDoubleToFixed(1) }}}, // Identity
+      {{{ XDoubleToFixed(-1), 0, XDoubleToFixed(size) }, { 0, XDoubleToFixed(1), 0 }, { 0, 0, XDoubleToFixed(1) }}}, // Flip H
+      {{{ XDoubleToFixed(1), 0, 0 }, { 0, XDoubleToFixed(-1), XDoubleToFixed(size) }, { 0, 0, XDoubleToFixed(1) }}}, // Flip V
+      {{{ XDoubleToFixed(-1), 0, XDoubleToFixed(size) }, { 0, XDoubleToFixed(-1), XDoubleToFixed(size) }, { 0, 0, XDoubleToFixed(1) }}} // Flip HV
+    };
+
+    for (int i = 0; i < 4; i++) {
+      corner_masks[i] = XRenderCreatePicture(dpy, pix, format, 0, 0);
+      border_masks[i] = XRenderCreatePicture(dpy, b_pix, format, 0, 0);
+      XRenderSetPictureTransform(dpy, corner_masks[i], &xforms[i]);
+      XRenderSetPictureTransform(dpy, border_masks[i], &xforms[i]);
+    }
+
     XFreePixmap(dpy, pix);
     XFreePixmap(dpy, b_pix);
   }
