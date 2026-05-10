@@ -4,7 +4,7 @@
 fastcompmgr \- a _fast_ compositor for X11
 .SH SYNOPSIS
 .nf
-.B fastcompmgr [\-d display] [\-r radius] [\-o opacity] [\-l left-offset] [\-t top-offset] [\-i opacity] [\-e opacity] [\-cCfFS]
+.B fastcompmgr [\-d display] [\-r radius] [\-o opacity] [\-l left-offset] [\-t top-offset] [\-i opacity] [\-e opacity] [\-R corner-radius] [\-cCfFS]
 .fi
 .SH DESCRIPTION
 .B fastcompmgr
@@ -58,6 +58,9 @@ Specifies inactive window transparency. (0.1 - 1.0)
 .TP
 .BI \-e\ opacity
 Specifies window frame transparency. (0.1 - 1.0)
+.TP
+.BI \-R\ corner-radius
+Specifies the radius for rounded window corners.
 .TP
 .BI \-S
 Enables synchronous operation.  Useful for debugging.
