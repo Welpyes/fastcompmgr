@@ -136,6 +136,12 @@ int corner_radius = 0;
 Picture corner_mask = None;
 static Picture corner_alpha_mask = None;
 static int corner_alpha_mask_size = 0;
+static Picture border_mask = None;
+static Picture border_picture = None;
+static Picture active_border_picture = None;
+static double border_red = 0.5, border_green = 0.0, border_blue = 0.5;
+static double active_border_red = 0.5, active_border_green = 0.0, active_border_blue = 0.5;
+static Window active_win = None;
 
 #define INACTIVE_OPACITY \
 (unsigned long)((double)inactive_opacity * OPAQUE)
@@ -660,9 +666,9 @@ solid_picture(Display *dpy, Bool argb, double a,
   }
 
   c.alpha = a * 0xffff;
-  c.red = r * 0xffff;
-  c.green = g * 0xffff;
-  c.blue = b * 0xffff;
+  c.red = r * c.alpha;
+  c.green = g * c.alpha;
+  c.blue = b * c.alpha;
 
   XRenderFillRectangle(dpy, PictOpSrc, picture, &c, 0, 0, 1, 1);
   XFreePixmap(dpy, pixmap);
@@ -952,11 +958,69 @@ draw_rounded_part(Display *dpy, int op, Picture src, Picture mask, Picture dst,
 }
 
 static void
+draw_border_overlay(Display *dpy, win *w, Picture dst, int x, int y, int wid, int hei) {
+  if (border_mask == None) return;
+
+  Picture border_src = (w->id == active_win) ? active_border_picture : border_picture;
+  if (border_src == None) border_src = border_picture;
+  if (border_src == None) return;
+
+  int size = corner_radius;
+  int b_width = 2;
+  XTransform xform = {{
+    { XDoubleToFixed(1), 0, 0 },
+    { 0, XDoubleToFixed(1), 0 },
+    { 0, 0, XDoubleToFixed(1) }
+  }};
+
+  /* 4 Straight edges */
+  XRenderComposite(dpy, PictOpOver, border_src, None, dst, 0, 0, 0, 0, x + size, y, wid - size * 2, b_width);
+  XRenderComposite(dpy, PictOpOver, border_src, None, dst, 0, 0, 0, 0, x + size, y + hei - b_width, wid - size * 2, b_width);
+  XRenderComposite(dpy, PictOpOver, border_src, None, dst, 0, 0, 0, 0, x, y + size, b_width, hei - size * 2);
+  XRenderComposite(dpy, PictOpOver, border_src, None, dst, 0, 0, 0, 0, x + wid - b_width, y + size, b_width, hei - size * 2);
+
+  /* 4 Corners */
+  /* Top-left */
+  xform.matrix[0][0] = XDoubleToFixed(1);
+  xform.matrix[1][1] = XDoubleToFixed(1);
+  xform.matrix[0][2] = 0;
+  xform.matrix[1][2] = 0;
+  XRenderSetPictureTransform(dpy, border_mask, &xform);
+  XRenderComposite(dpy, PictOpOver, border_src, border_mask, dst, 0, 0, 0, 0, x, y, size, size);
+
+  /* Top-right */
+  xform.matrix[0][0] = XDoubleToFixed(-1);
+  xform.matrix[1][1] = XDoubleToFixed(1);
+  xform.matrix[0][2] = XDoubleToFixed(size);
+  xform.matrix[1][2] = 0;
+  XRenderSetPictureTransform(dpy, border_mask, &xform);
+  XRenderComposite(dpy, PictOpOver, border_src, border_mask, dst, 0, 0, 0, 0, x + wid - size, y, size, size);
+
+  /* Bottom-left */
+  xform.matrix[0][0] = XDoubleToFixed(1);
+  xform.matrix[1][1] = XDoubleToFixed(-1);
+  xform.matrix[0][2] = 0;
+  xform.matrix[1][2] = XDoubleToFixed(size);
+  XRenderSetPictureTransform(dpy, border_mask, &xform);
+  XRenderComposite(dpy, PictOpOver, border_src, border_mask, dst, 0, 0, 0, 0, x, y + hei - size, size, size);
+
+  /* Bottom-right */
+  xform.matrix[0][0] = XDoubleToFixed(-1);
+  xform.matrix[1][1] = XDoubleToFixed(-1);
+  xform.matrix[0][2] = XDoubleToFixed(size);
+  xform.matrix[1][2] = XDoubleToFixed(size);
+  XRenderSetPictureTransform(dpy, border_mask, &xform);
+  XRenderComposite(dpy, PictOpOver, border_src, border_mask, dst, 0, 0, 0, 0, x + wid - size, y + hei - size, size, size);
+}
+
+static void
 draw_rounded_window(Display *dpy, int op, win *w, Picture alpha, Picture dst,
                     int x, int y, int wid, int hei) {
+  if (unlikely(!w)) return;
   int size = corner_radius;
   if (size <= 0 || corner_mask == None) {
     XRenderComposite(dpy, op, w->picture, alpha, dst, 0, 0, 0, 0, x, y, wid, hei);
+    draw_border_overlay(dpy, w, dst, x, y, wid, hei);
     return;
   }
 
@@ -964,6 +1028,7 @@ draw_rounded_window(Display *dpy, int op, win *w, Picture alpha, Picture dst,
   if (hei < size * 2) size = hei / 2;
   if (size <= 0) {
     XRenderComposite(dpy, op, w->picture, alpha, dst, 0, 0, 0, 0, x, y, wid, hei);
+    draw_border_overlay(dpy, w, dst, x, y, wid, hei);
     return;
   }
 
@@ -1012,7 +1077,7 @@ draw_rounded_window(Display *dpy, int op, win *w, Picture alpha, Picture dst,
   /* Top-right */
   xform.matrix[0][0] = XDoubleToFixed(-1);
   xform.matrix[1][1] = XDoubleToFixed(1);
-  xform.matrix[0][2] = XDoubleToFixed(size - 1);
+  xform.matrix[0][2] = XDoubleToFixed(size);
   xform.matrix[1][2] = 0;
   XRenderSetPictureTransform(dpy, m, &xform);
   XRenderComposite(dpy, op, w->picture, m, dst, wid - size, 0, 0, 0, x + wid - size, y, size, size);
@@ -1021,17 +1086,19 @@ draw_rounded_window(Display *dpy, int op, win *w, Picture alpha, Picture dst,
   xform.matrix[0][0] = XDoubleToFixed(1);
   xform.matrix[1][1] = XDoubleToFixed(-1);
   xform.matrix[0][2] = 0;
-  xform.matrix[1][2] = XDoubleToFixed(size - 1);
+  xform.matrix[1][2] = XDoubleToFixed(size);
   XRenderSetPictureTransform(dpy, m, &xform);
   XRenderComposite(dpy, op, w->picture, m, dst, 0, hei - size, 0, 0, x, y + hei - size, size, size);
 
   /* Bottom-right */
   xform.matrix[0][0] = XDoubleToFixed(-1);
   xform.matrix[1][1] = XDoubleToFixed(-1);
-  xform.matrix[0][2] = XDoubleToFixed(size - 1);
-  xform.matrix[1][2] = XDoubleToFixed(size - 1);
+  xform.matrix[0][2] = XDoubleToFixed(size);
+  xform.matrix[1][2] = XDoubleToFixed(size);
   XRenderSetPictureTransform(dpy, m, &xform);
   XRenderComposite(dpy, op, w->picture, m, dst, wid - size, hei - size, 0, 0, x + wid - size, y + hei - size, size, size);
+
+  draw_border_overlay(dpy, w, dst, x, y, wid, hei);
 }
 
 static void
@@ -1249,6 +1316,8 @@ paint_all(Display *dpy, XserverRegion region) {
         XRenderComposite(
           dpy, PictOpOver, w->picture, w->alpha_pict, root_buffer,
           l, t, l, t, x + l, y + t, wid - l - r, hei - t - b);
+
+        draw_border_overlay(dpy, w, root_buffer, x, y, wid, hei);
       }
     }
   }
@@ -2247,6 +2316,10 @@ usage(char *program, int exitcode) {
     Opacity of window titlebars and borders. (0.1 - 1.0)
     -R corner-radius
     The radius of rounded window corners. (default 0)
+    -b border-color
+    Color of inactive window borders in #RRGGBB format.
+    -a active-border-color
+    Color of active window borders in #RRGGBB format.
     -S
     Enable synchronous operation (for debugging).
     --shadow-color "#RRGGBB"
@@ -2364,6 +2437,8 @@ main(int argc, char **argv) {
     { "shadow-color", required_argument, NULL, 0 },
     { "help", no_argument, NULL, 0 },
     { "corner-radius", required_argument, NULL, 'R' },
+    { "border-color", required_argument, NULL, 'b' },
+    { "active-border-color", required_argument, NULL, 'a' },
     { 0, 0, 0, 0 },
   };
 
@@ -2395,7 +2470,7 @@ main(int argc, char **argv) {
     win_type_opacity[i] = 1.0;
   }
 
-  while ((o = getopt_long(argc, argv, "D:I:O:d:r:o:m:l:t:i:e:schnfFCaSR:",
+  while ((o = getopt_long(argc, argv, "D:I:O:d:r:o:m:l:t:i:e:schnfFCSR:b:a:",
                           longopt, &longopt_idx)) != -1) {
     switch (o) {
        // Long options
@@ -2481,11 +2556,22 @@ main(int argc, char **argv) {
       case 'R':
         corner_radius = atoi(optarg);
         break;
-      case 'n':
+      case 'b':
+        if (!parse_hex_color(optarg, &border_red, &border_green, &border_blue)) {
+          fprintf(stderr, "Invalid border color format: %s. Use #RRGGBB\n", optarg);
+          exit(1);
+        }
+        break;
       case 'a':
+        if (!parse_hex_color(optarg, &active_border_red, &active_border_green, &active_border_blue)) {
+          fprintf(stderr, "Invalid active border color format: %s. Use #RRGGBB\n", optarg);
+          exit(1);
+        }
+        break;
+      case 'n':
       case 's':
         fprintf(stderr, "Warning: "
-          "-n, -a, and -s have been removed.\n");
+          "-n and -s have been removed.\n");
         break;
       default:
         usage(argv[0], 1);
@@ -2602,31 +2688,75 @@ main(int argc, char **argv) {
   }
 
   black_picture = solid_picture(dpy, True, 1, 0, 0, 0);
+  border_picture = solid_picture(dpy, True, 1, border_red, border_green, border_blue);
+  active_border_picture = solid_picture(dpy, True, 1, active_border_red, active_border_green, active_border_blue);
+
+  if (!black_picture || !border_picture || !active_border_picture) {
+    fprintf(stderr, "Error: Failed to create solid color pictures\n");
+    exit(1);
+  }
 
   if (corner_radius > 0) {
     int size = corner_radius;
-    Pixmap pix = XCreatePixmap(dpy, root, size, size, 8);
+    int b_width = 2; /* Hardcoded 2px border for now */
     XRenderPictFormat *format = XRenderFindStandardFormat(dpy, PictStandardA8);
+    if (!format) {
+      fprintf(stderr, "Error: Standard A8 format not found\n");
+      exit(1);
+    }
+    Pixmap pix = XCreatePixmap(dpy, root, size, size, 8);
+    Pixmap b_pix = XCreatePixmap(dpy, root, size, size, 8);
+    if (!pix || !b_pix) {
+      fprintf(stderr, "Error: Failed to create pixmaps for corner masks\n");
+      exit(1);
+    }
     corner_mask = XRenderCreatePicture(dpy, pix, format, 0, 0);
+    border_mask = XRenderCreatePicture(dpy, b_pix, format, 0, 0);
+    
+    if (!corner_mask || !border_mask) {
+      fprintf(stderr, "Error: Failed to create pictures for corner masks\n");
+      exit(1);
+    }
+    
     XRenderColor c = {0, 0, 0, 0};
     XRenderFillRectangle(dpy, PictOpSrc, corner_mask, &c, 0, 0, size, size);
+    XRenderFillRectangle(dpy, PictOpSrc, border_mask, &c, 0, 0, size, size);
+
     for (int y = 0; y < size; y++) {
       for (int x = 0; x < size; x++) {
-        double dx = (size - 1) - x;
-        double dy = (size - 1) - y;
+        double dx = size - x;
+        double dy = size - y;
         double dist = sqrt(dx*dx + dy*dy);
         
-        if (dist <= size - 1) {
+        /* Window clip mask */
+        if (dist <= size) {
           c.alpha = 0xffff;
-        } else if (dist < size) {
-          c.alpha = (unsigned short)((1.0 - (dist - (size - 1))) * 0xffff);
+        } else if (dist < size + 1.0) {
+          c.alpha = (unsigned short)((1.0 - (dist - size)) * 0xffff);
         } else {
           c.alpha = 0x0000;
         }
         XRenderFillRectangle(dpy, PictOpSrc, corner_mask, &c, x, y, 1, 1);
+
+        /* Border mask (arc segment) */
+        if (dist >= (size - b_width) && dist <= size + 1.0) {
+           double alpha = 1.0;
+           if (dist < size) {
+              /* AA inner */
+              alpha = (dist - (size - b_width));
+           } else {
+              /* AA outer */
+              alpha = 1.0 - (dist - size);
+           }
+           if (alpha < 0) alpha = 0;
+           if (alpha > 1) alpha = 1;
+           c.alpha = (unsigned short)(alpha * 0xffff);
+           XRenderFillRectangle(dpy, PictOpSrc, border_mask, &c, x, y, 1, 1);
+        }
       }
     }
     XFreePixmap(dpy, pix);
+    XFreePixmap(dpy, b_pix);
   }
 
   // Allow for user-defined shadow color:
@@ -2652,11 +2782,33 @@ main(int argc, char **argv) {
     | StructureNotifyMask
     | PropertyChangeMask);
 
+  /* Get initial active window */
+  {
+    Atom actual_type;
+    int actual_format;
+    unsigned long n_items, bytes_after;
+    unsigned char *prop = NULL;
+    if (XGetWindowProperty(dpy, root, atom_net_active_window, 0, 1, False,
+                           XA_WINDOW, &actual_type, &actual_format,
+                           &n_items, &bytes_after, &prop) == Success && prop) {
+        Window new_active = *(Window *)prop;
+        XFree(prop);
+        active_win = new_active; /* Will be refined in the loop if needed */
+    }
+  }
+
   XQueryTree(dpy, root, &root_return,
     &parent_return, &children, &nchildren);
 
   for (i = 0; i < nchildren; i++) {
     add_win(dpy, children[i], i ? children[i-1] : None);
+  }
+
+  /* Refine initial active_win to frame window */
+  if (active_win != None) {
+      win *aw = find_win_any_parent(active_win);
+      if (aw) active_win = aw->id;
+      else active_win = None;
   }
 
   XFree(children);
@@ -2699,6 +2851,16 @@ main(int argc, char **argv) {
 
       switch (ev.type) {
         case FocusIn: {
+          win *w = find_win_any_parent(ev.xfocus.window);
+          if (w) {
+            Window old_active = active_win;
+            active_win = w->id;
+            if (active_win != old_active) {
+              if (w->extents) add_damage(dpy, w->extents);
+              win *ow = find_win(old_active);
+              if (ow && ow->extents) add_damage(dpy, ow->extents);
+            }
+          }
           if (!inactive_opacity) break;
 
           // stop focusing windows the cursor is over.
@@ -2714,6 +2876,11 @@ main(int argc, char **argv) {
           break;
         }
         case FocusOut: {
+          win *w = find_win_any_parent(ev.xfocus.window);
+          if (w && active_win == w->id) {
+            active_win = None;
+            if (w->extents) add_damage(dpy, w->extents);
+          }
           if (!inactive_opacity) break;
 
           // this fixes deiconify refocus
@@ -2816,6 +2983,27 @@ main(int argc, char **argv) {
             }
           } else if (ev.xproperty.atom == atom_net_wm_state) {
             add_damage_if_hidden_changed(ev.xproperty.window, false);
+          } else if (ev.xproperty.window == root && ev.xproperty.atom == atom_net_active_window) {
+            Atom actual_type;
+            int actual_format;
+            unsigned long n_items, bytes_after;
+            unsigned char *prop = NULL;
+            if (XGetWindowProperty(dpy, root, atom_net_active_window, 0, 1, False,
+                                   XA_WINDOW, &actual_type, &actual_format,
+                                   &n_items, &bytes_after, &prop) == Success && prop) {
+                Window new_active = *(Window *)prop;
+                XFree(prop);
+                win *w = find_win_any_parent(new_active);
+                if (w) {
+                    Window old_active = active_win;
+                    active_win = w->id;
+                    if (active_win != old_active) {
+                        if (w->extents) add_damage(dpy, w->extents);
+                        win *ow = find_win(old_active);
+                        if (ow && ow->extents) add_damage(dpy, ow->extents);
+                    }
+                }
+            }
           }
           break;
         case SelectionClear:
