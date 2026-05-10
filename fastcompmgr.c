@@ -132,6 +132,8 @@ Bool fade_trans = False;
 
 double inactive_opacity = 0;
 double frame_opacity = 0;
+int corner_radius = 0;
+Picture corner_mask = None;
 
 #define INACTIVE_OPACITY \
 (unsigned long)((double)inactive_opacity * OPAQUE)
@@ -940,6 +942,55 @@ win_paint_needed(win* w, CompRect* ignore_reg){
 }
 
 static void
+paint_corner_masks(Display *dpy, win *w, Picture buffer, int x, int y, int wid, int hei) {
+  if (corner_mask == None || corner_radius <= 0) return;
+
+  if (!root_tile) {
+    root_tile = root_create_tile();
+  }
+
+  XTransform xform = {{
+    { XDoubleToFixed(1), 0, 0 },
+    { 0, XDoubleToFixed(1), 0 },
+    { 0, 0, XDoubleToFixed(1) }
+  }};
+
+  int size = corner_radius;
+
+  /* Top-left */
+  xform.matrix[0][0] = XDoubleToFixed(1);
+  xform.matrix[1][1] = XDoubleToFixed(1);
+  xform.matrix[0][2] = 0;
+  xform.matrix[1][2] = 0;
+  XRenderSetPictureTransform(dpy, corner_mask, &xform);
+  XRenderComposite(dpy, PictOpOver, root_tile, corner_mask, buffer, x, y, 0, 0, x, y, size, size);
+
+  /* Top-right */
+  xform.matrix[0][0] = XDoubleToFixed(-1);
+  xform.matrix[1][1] = XDoubleToFixed(1);
+  xform.matrix[0][2] = XDoubleToFixed(size);
+  xform.matrix[1][2] = 0;
+  XRenderSetPictureTransform(dpy, corner_mask, &xform);
+  XRenderComposite(dpy, PictOpOver, root_tile, corner_mask, buffer, x + wid - size, y, 0, 0, x + wid - size, y, size, size);
+
+  /* Bottom-left */
+  xform.matrix[0][0] = XDoubleToFixed(1);
+  xform.matrix[1][1] = XDoubleToFixed(-1);
+  xform.matrix[0][2] = 0;
+  xform.matrix[1][2] = XDoubleToFixed(size);
+  XRenderSetPictureTransform(dpy, corner_mask, &xform);
+  XRenderComposite(dpy, PictOpOver, root_tile, corner_mask, buffer, x, y + hei - size, 0, 0, x, y + hei - size, size, size);
+
+  /* Bottom-right */
+  xform.matrix[0][0] = XDoubleToFixed(-1);
+  xform.matrix[1][1] = XDoubleToFixed(-1);
+  xform.matrix[0][2] = XDoubleToFixed(size);
+  xform.matrix[1][2] = XDoubleToFixed(size);
+  XRenderSetPictureTransform(dpy, corner_mask, &xform);
+  XRenderComposite(dpy, PictOpOver, root_tile, corner_mask, buffer, x + wid - size, y + hei - size, 0, 0, x + wid - size, y + hei - size, size, size);
+}
+
+static void
 paint_all(Display *dpy, XserverRegion region) {
   win *w;
   win *t = 0;
@@ -1064,6 +1115,8 @@ paint_all(Display *dpy, XserverRegion region) {
         dpy, PictOpSrc, w->picture,
         None, root_buffer, 0, 0, 0, 0,
         x, y, wid, hei);
+
+      paint_corner_masks(dpy, w, root_buffer, x, y, wid, hei);
     }
 
     XFixesCopyRegion(dpy, w->border_clip, region);
@@ -1128,6 +1181,8 @@ paint_all(Display *dpy, XserverRegion region) {
         XRenderComposite(
           dpy, PictOpOver, w->picture, w->alpha_pict,
           root_buffer, 0, 0, 0, 0, x, y, wid, hei);
+        
+        paint_corner_masks(dpy, w, root_buffer, x, y, wid, hei);
       } else {
         /* TODO - clean me */
         unsigned int t = w->top_width;
@@ -2155,6 +2210,8 @@ usage(char *program, int exitcode) {
     Opacity of inactive windows. (0.1 - 1.0)
     -e opacity
     Opacity of window titlebars and borders. (0.1 - 1.0)
+    -R corner-radius
+    The radius of rounded window corners. (default 0)
     -S
     Enable synchronous operation (for debugging).
     --shadow-color "#RRGGBB"
@@ -2271,6 +2328,7 @@ main(int argc, char **argv) {
   const static struct option longopt[] = {
     { "shadow-color", required_argument, NULL, 0 },
     { "help", no_argument, NULL, 0 },
+    { "corner-radius", required_argument, NULL, 'R' },
     { 0, 0, 0, 0 },
   };
 
@@ -2302,7 +2360,7 @@ main(int argc, char **argv) {
     win_type_opacity[i] = 1.0;
   }
 
-  while ((o = getopt_long(argc, argv, "D:I:O:d:r:o:m:l:t:i:e:schnfFCaS",
+  while ((o = getopt_long(argc, argv, "D:I:O:d:r:o:m:l:t:i:e:schnfFCaSR:",
                           longopt, &longopt_idx)) != -1) {
     switch (o) {
        // Long options
@@ -2384,6 +2442,9 @@ main(int argc, char **argv) {
         break;
       case 'e':
         frame_opacity = (double)atof(optarg);
+        break;
+      case 'R':
+        corner_radius = atoi(optarg);
         break;
       case 'n':
       case 'a':
@@ -2506,6 +2567,28 @@ main(int argc, char **argv) {
   }
 
   black_picture = solid_picture(dpy, True, 1, 0, 0, 0);
+
+  if (corner_radius > 0) {
+    int size = corner_radius;
+    Pixmap pix = XCreatePixmap(dpy, root, size, size, 8);
+    XRenderPictFormat *format = XRenderFindStandardFormat(dpy, PictStandardA8);
+    corner_mask = XRenderCreatePicture(dpy, pix, format, 0, 0);
+    XRenderColor c = {0, 0, 0, 0};
+    XRenderFillRectangle(dpy, PictOpSrc, corner_mask, &c, 0, 0, size, size);
+    c.alpha = 0xffff;
+    for (int y = 0; y < size; y++) {
+      for (int x = 0; x < size; x++) {
+        double dist = sqrt(pow(size - 1 - x, 2) + pow(size - 1 - y, 2));
+        if (dist > size) {
+          XRenderFillRectangle(dpy, PictOpSrc, corner_mask, &c, x, y, 1, 1);
+        } else if (dist > size - 1) {
+          c.alpha = (dist - (size - 1)) * 0xffff;
+          XRenderFillRectangle(dpy, PictOpSrc, corner_mask, &c, x, y, 1, 1);
+        }
+      }
+    }
+    XFreePixmap(dpy, pix);
+  }
 
   // Allow for user-defined shadow color:
   if (!shadow_red && !shadow_green && !shadow_blue)
