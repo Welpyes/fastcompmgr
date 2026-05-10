@@ -942,52 +942,92 @@ win_paint_needed(win* w, CompRect* ignore_reg){
 }
 
 static void
-paint_corner_masks(Display *dpy, win *w, Picture buffer, int x, int y, int wid, int hei) {
-  if (corner_mask == None || corner_radius <= 0) return;
+draw_rounded_part(Display *dpy, int op, Picture src, Picture mask, Picture dst,
+                  int src_x, int src_y, int mask_x, int mask_y, int dst_x, int dst_y,
+                  int w, int h) {
+  if (w <= 0 || h <= 0) return;
+  XRenderComposite(dpy, op, src, mask, dst, src_x, src_y, mask_x, mask_y, dst_x, dst_y, w, h);
+}
 
-  if (!root_tile) {
-    root_tile = root_create_tile();
+static void
+draw_rounded_window(Display *dpy, int op, win *w, Picture alpha, Picture dst,
+                    int x, int y, int wid, int hei) {
+  int size = corner_radius;
+  if (size <= 0 || corner_mask == None) {
+    XRenderComposite(dpy, op, w->picture, alpha, dst, 0, 0, 0, 0, x, y, wid, hei);
+    return;
   }
 
+  if (wid < size * 2) size = wid / 2;
+  if (hei < size * 2) size = hei / 2;
+
+  /* 3 Rects for body */
+  /* Top strip */
+  draw_rounded_part(dpy, op, w->picture, alpha, dst, size, 0, 0, 0, x + size, y, wid - size * 2, size);
+  /* Middle */
+  draw_rounded_part(dpy, op, w->picture, alpha, dst, 0, size, 0, 0, x, y + size, wid, hei - size * 2);
+  /* Bottom strip */
+  draw_rounded_part(dpy, op, w->picture, alpha, dst, size, hei - size, 0, 0, x + size, y + hei - size, wid - size * 2, size);
+
+  /* 4 Corners */
   XTransform xform = {{
     { XDoubleToFixed(1), 0, 0 },
     { 0, XDoubleToFixed(1), 0 },
     { 0, 0, XDoubleToFixed(1) }
   }};
 
-  int size = corner_radius;
+  /* Create temporary mask if we have both corner mask and alpha (opacity) */
+  Picture m = corner_mask;
+  Picture tmp_m = None;
+  if (alpha != None) {
+    /* Optimization: Use PictOpIn to combine corner_mask and alpha into a 32x32 temp mask */
+    /* For now, just use alpha as the mask in a multi-stage composite if we want correctness, 
+       but XRender only has 1 mask slot. 
+       Simple way: Use corner_mask as mask, and use w->picture as source. 
+       But where does alpha go? 
+       Actually, if alpha is a SOLID picture, we can use it as the MASK and corner_mask as the SOURCE? No.
+       Let's create the temp mask. It's only 32x32. */
+    int csize = corner_radius;
+    Pixmap pix = XCreatePixmap(dpy, root, csize, csize, 8);
+    tmp_m = XRenderCreatePicture(dpy, pix, XRenderFindStandardFormat(dpy, PictStandardA8), 0, 0);
+    XRenderComposite(dpy, PictOpSrc, corner_mask, alpha, tmp_m, 0, 0, 0, 0, 0, 0, csize, csize);
+    m = tmp_m;
+    XFreePixmap(dpy, pix);
+  }
 
   /* Top-left */
   xform.matrix[0][0] = XDoubleToFixed(1);
   xform.matrix[1][1] = XDoubleToFixed(1);
   xform.matrix[0][2] = 0;
   xform.matrix[1][2] = 0;
-  XRenderSetPictureTransform(dpy, corner_mask, &xform);
-  XRenderComposite(dpy, PictOpOver, root_tile, corner_mask, buffer, x, y, 0, 0, x, y, size, size);
+  XRenderSetPictureTransform(dpy, m, &xform);
+  XRenderComposite(dpy, op, w->picture, m, dst, 0, 0, 0, 0, x, y, size, size);
 
   /* Top-right */
   xform.matrix[0][0] = XDoubleToFixed(-1);
   xform.matrix[1][1] = XDoubleToFixed(1);
-  xform.matrix[0][2] = XDoubleToFixed(size);
+  xform.matrix[0][2] = XDoubleToFixed(corner_radius);
   xform.matrix[1][2] = 0;
-  XRenderSetPictureTransform(dpy, corner_mask, &xform);
-  XRenderComposite(dpy, PictOpOver, root_tile, corner_mask, buffer, x + wid - size, y, 0, 0, x + wid - size, y, size, size);
+  XRenderSetPictureTransform(dpy, m, &xform);
+  XRenderComposite(dpy, op, w->picture, m, dst, wid - size, 0, 0, 0, x + wid - size, y, size, size);
 
   /* Bottom-left */
   xform.matrix[0][0] = XDoubleToFixed(1);
   xform.matrix[1][1] = XDoubleToFixed(-1);
   xform.matrix[0][2] = 0;
-  xform.matrix[1][2] = XDoubleToFixed(size);
-  XRenderSetPictureTransform(dpy, corner_mask, &xform);
-  XRenderComposite(dpy, PictOpOver, root_tile, corner_mask, buffer, x, y + hei - size, 0, 0, x, y + hei - size, size, size);
+  xform.matrix[1][2] = XDoubleToFixed(corner_radius);
+  XRenderSetPictureTransform(dpy, m, &xform);
+  XRenderComposite(dpy, op, w->picture, m, dst, 0, hei - size, 0, 0, x, y + hei - size, size, size);
 
   /* Bottom-right */
   xform.matrix[0][0] = XDoubleToFixed(-1);
   xform.matrix[1][1] = XDoubleToFixed(-1);
-  xform.matrix[0][2] = XDoubleToFixed(size);
-  xform.matrix[1][2] = XDoubleToFixed(size);
-  XRenderSetPictureTransform(dpy, corner_mask, &xform);
-  XRenderComposite(dpy, PictOpOver, root_tile, corner_mask, buffer, x + wid - size, y + hei - size, 0, 0, x + wid - size, y + hei - size, size, size);
+  xform.matrix[0][2] = XDoubleToFixed(corner_radius);
+  xform.matrix[1][2] = XDoubleToFixed(corner_radius);
+  XRenderSetPictureTransform(dpy, m, &xform);
+  XRenderComposite(dpy, op, w->picture, m, dst, wid - size, hei - size, 0, 0, x + wid - size, y + hei - size, size, size);
+
+  if (tmp_m != None) XRenderFreePicture(dpy, tmp_m);
 }
 
 static void
@@ -1111,12 +1151,7 @@ paint_all(Display *dpy, XserverRegion region) {
       set_ignore(dpy, NextRequest(dpy));
       XFixesSubtractRegion(dpy, region, region, w->border_size);
 
-      XRenderComposite(
-        dpy, PictOpSrc, w->picture,
-        None, root_buffer, 0, 0, 0, 0,
-        x, y, wid, hei);
-
-      paint_corner_masks(dpy, w, root_buffer, x, y, wid, hei);
+      draw_rounded_window(dpy, PictOpSrc, w, None, root_buffer, x, y, wid, hei);
     }
 
     XFixesCopyRegion(dpy, w->border_clip, region);
@@ -1178,11 +1213,7 @@ paint_all(Display *dpy, XserverRegion region) {
       set_ignore(dpy, NextRequest(dpy));
 
       if (!HAS_FRAME_OPACITY(w)) {
-        XRenderComposite(
-          dpy, PictOpOver, w->picture, w->alpha_pict,
-          root_buffer, 0, 0, 0, 0, x, y, wid, hei);
-        
-        paint_corner_masks(dpy, w, root_buffer, x, y, wid, hei);
+        draw_rounded_window(dpy, PictOpOver, w, w->alpha_pict, root_buffer, x, y, wid, hei);
       } else {
         /* TODO - clean me */
         unsigned int t = w->top_width;
@@ -2579,12 +2610,11 @@ main(int argc, char **argv) {
     for (int y = 0; y < size; y++) {
       for (int x = 0; x < size; x++) {
         double dist = sqrt(pow(size - 1 - x, 2) + pow(size - 1 - y, 2));
-        if (dist >= size) {
+        if (dist <= size - 1) {
           XRenderFillRectangle(dpy, PictOpSrc, corner_mask, &c, x, y, 1, 1);
-        } else if (dist > size - 1) {
-          c.alpha = (dist - (size - 1)) * 0xffff;
+        } else if (dist < size) {
+          c.alpha = (1.0 - (dist - (size - 1))) * 0xffff;
           XRenderFillRectangle(dpy, PictOpSrc, corner_mask, &c, x, y, 1, 1);
-          c.alpha = 0xffff;
         }
       }
     }
