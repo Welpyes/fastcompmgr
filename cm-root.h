@@ -11,6 +11,7 @@ extern Picture root_buffer;
 extern int root_width;
 extern int root_height;
 extern const char *root_background_props[];
+extern bool pseudo_transparency;
 
 
 bool root_init();

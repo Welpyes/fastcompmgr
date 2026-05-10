@@ -963,6 +963,7 @@ draw_rounded_part(Display *dpy, int op, Picture src, Picture mask, Picture dst,
 static void
 draw_border_overlay(Display *dpy, win *w, Picture dst, int x, int y, int wid, int hei) {
   if (border_masks[0] == None) return;
+  if (w->window_type != WINTYPE_NORMAL || w->is_rofi) return;
 
   bool is_active = (w->id == active_win);
   Picture border_src = is_active ? active_border_picture : border_picture;
@@ -990,10 +991,80 @@ draw_border_overlay(Display *dpy, win *w, Picture dst, int x, int y, int wid, in
 }
 
 static void
+draw_pseudo_transparency(Display *dpy, win *w, Picture alpha, Picture dst,
+                         int x, int y, int wid, int hei) {
+  if (!pseudo_transparency || root_tile == None) return;
+
+  int size = corner_radius;
+  if (size <= 0 || corner_mask == None) {
+    XRenderComposite(dpy, PictOpOver, root_tile, alpha, dst, x, y, 0, 0, x, y, wid, hei);
+    return;
+  }
+
+  if (wid < size * 2) size = wid / 2;
+  if (hei < size * 2) size = hei / 2;
+  if (size <= 0) {
+    XRenderComposite(dpy, PictOpOver, root_tile, alpha, dst, x, y, 0, 0, x, y, wid, hei);
+    return;
+  }
+
+  /* Body */
+  XRenderComposite(dpy, PictOpOver, root_tile, alpha, dst, x + size, y, 0, 0, x + size, y, wid - size * 2, size);
+  XRenderComposite(dpy, PictOpOver, root_tile, alpha, dst, x, y + size, 0, 0, x, y + size, wid, hei - size * 2);
+  XRenderComposite(dpy, PictOpOver, root_tile, alpha, dst, x + size, y + hei - size, 0, 0, x + size, y + hei - size, wid - size * 2, size);
+
+  /* Corners */
+  if (alpha == None) {
+    XRenderComposite(dpy, PictOpOver, root_tile, corner_masks[0], dst, x, y, 0, 0, x, y, size, size);
+    XRenderComposite(dpy, PictOpOver, root_tile, corner_masks[1], dst, x + wid - size, y, 0, 0, x + wid - size, y, size, size);
+    XRenderComposite(dpy, PictOpOver, root_tile, corner_masks[2], dst, x, y + hei - size, 0, 0, x, y + hei - size, size, size);
+    XRenderComposite(dpy, PictOpOver, root_tile, corner_masks[3], dst, x + wid - size, y + hei - size, 0, 0, x + wid - size, y + hei - size, size, size);
+  } else {
+    /* TRANS windows with corners: use same logic as draw_rounded_window */
+    XTransform xform = {{{ XDoubleToFixed(1), 0, 0 }, { 0, XDoubleToFixed(1), 0 }, { 0, 0, XDoubleToFixed(1) }}};
+
+    /* Top-left */
+    XRenderComposite(dpy, PictOpSrc, corner_mask, alpha, corner_alpha_mask, 0, 0, 0, 0, 0, 0, size, size);
+    XRenderSetPictureTransform(dpy, corner_alpha_mask, &xform);
+    XRenderComposite(dpy, PictOpOver, root_tile, corner_alpha_mask, dst, x, y, 0, 0, x, y, size, size);
+
+    /* Top-right */
+    xform.matrix[0][0] = XDoubleToFixed(-1);
+    xform.matrix[0][2] = XDoubleToFixed(size);
+    XRenderSetPictureTransform(dpy, corner_alpha_mask, &xform);
+    XRenderComposite(dpy, PictOpOver, root_tile, corner_alpha_mask, dst, x + wid - size, y, 0, 0, x + wid - size, y, size, size);
+
+    /* Bottom-left */
+    xform.matrix[0][0] = XDoubleToFixed(1);
+    xform.matrix[0][2] = 0;
+    xform.matrix[1][1] = XDoubleToFixed(-1);
+    xform.matrix[1][2] = XDoubleToFixed(size);
+    XRenderSetPictureTransform(dpy, corner_alpha_mask, &xform);
+    XRenderComposite(dpy, PictOpOver, root_tile, corner_alpha_mask, dst, x, y + hei - size, 0, 0, x, y + hei - size, size, size);
+
+    /* Bottom-right */
+    xform.matrix[0][0] = XDoubleToFixed(-1);
+    xform.matrix[0][2] = XDoubleToFixed(size);
+    xform.matrix[1][1] = XDoubleToFixed(-1);
+    xform.matrix[1][2] = XDoubleToFixed(size);
+    XRenderSetPictureTransform(dpy, corner_alpha_mask, &xform);
+    XRenderComposite(dpy, PictOpOver, root_tile, corner_alpha_mask, dst, x + wid - size, y + hei - size, 0, 0, x + wid - size, y + hei - size, size, size);
+  }
+}
+
+static void
 draw_rounded_window(Display *dpy, int op, win *w, Picture alpha, Picture dst,
                     int x, int y, int wid, int hei) {
   if (unlikely(!w)) return;
-  int size = corner_radius;
+
+  bool is_normal = (w->window_type == WINTYPE_NORMAL && !w->is_rofi);
+
+  if (pseudo_transparency && is_normal && (w->mode != WINDOW_SOLID || HAS_FRAME_OPACITY(w))) {
+    draw_pseudo_transparency(dpy, w, alpha, dst, x, y, wid, hei);
+    op = PictOpOver;
+  }
+
+  int size = is_normal ? corner_radius : 0;
   if (size <= 0 || corner_mask == None) {
     XRenderComposite(dpy, op, w->picture, alpha, dst, 0, 0, 0, 0, x, y, wid, hei);
     draw_border_overlay(dpy, w, dst, x, y, wid, hei);
@@ -1232,6 +1303,7 @@ paint_all(Display *dpy, XserverRegion region) {
 
     if (w->mode != WINDOW_SOLID || HAS_FRAME_OPACITY(w)) {
       int x, y, wid, hei;
+
       // 2024-11-26: Without the next two lines, the Microsoft-Teams screen-share
       // window has a broken frame instead of a shadow, with a "startup-frozen"
       // picture. Inspired by xcompmgr's commit 5a7d139f (2012-08-11).
@@ -1487,6 +1559,19 @@ get_opacity_prop(Display *dpy, win *w, unsigned int def);
 static void
 handle_ConfigureNotify(Display *dpy, XConfigureEvent *ce);
 
+static bool
+determine_is_rofi(Display *dpy, Window w) {
+  XClassHint ch;
+  bool is_rofi = false;
+  if (XGetClassHint(dpy, w, &ch)) {
+    if (ch.res_name && strcasecmp(ch.res_name, "rofi") == 0) is_rofi = true;
+    if (ch.res_class && strcasecmp(ch.res_class, "rofi") == 0) is_rofi = true;
+    if (ch.res_name) XFree(ch.res_name);
+    if (ch.res_class) XFree(ch.res_class);
+  }
+  return is_rofi;
+}
+
 static void
 map_win(Display *dpy, Window id,
         unsigned long sequence, Bool fade) {
@@ -1496,6 +1581,7 @@ map_win(Display *dpy, Window id,
 
   w->a.map_state = IsViewable;
   w->window_type = determine_wintype(dpy, w->id, w->id);
+  w->is_rofi = determine_is_rofi(dpy, w->id);
 
   if (! w->border_clip) {
     w->border_clip = XFixesCreateRegion(dpy, 0, 0);
@@ -1813,6 +1899,7 @@ add_win(Display *dpy, Window id, Window prev) {
 
   if (new->a.map_state == IsViewable) {
     new->window_type = determine_wintype(dpy, id, id);
+    new->is_rofi = determine_is_rofi(dpy, id);
     new->opacity = win_suggest_opacity(new, &new->userdefined_opacity);
     map_win(dpy, id, new->damage_sequence - 1, True);
   }
@@ -2289,6 +2376,8 @@ usage(char *program, int exitcode) {
     Color of inactive window borders in #RRGGBB format.
     -a active-border-color
     Color of active window borders in #RRGGBB format.
+    -p
+    Enable pseudo-transparency using the root background.
     -S
     Enable synchronous operation (for debugging).
     --shadow-color "#RRGGBB"
@@ -2408,6 +2497,7 @@ main(int argc, char **argv) {
     { "corner-radius", required_argument, NULL, 'R' },
     { "border-color", required_argument, NULL, 'b' },
     { "active-border-color", required_argument, NULL, 'a' },
+    { "pseudo-transparency", no_argument, NULL, 'p' },
     { 0, 0, 0, 0 },
   };
 
@@ -2439,7 +2529,7 @@ main(int argc, char **argv) {
     win_type_opacity[i] = 1.0;
   }
 
-  while ((o = getopt_long(argc, argv, "D:I:O:d:r:o:m:l:t:i:e:schnfFCSR:b:a:",
+  while ((o = getopt_long(argc, argv, "D:I:O:d:r:o:m:l:t:i:e:schnfFCSR:b:a:p",
                           longopt, &longopt_idx)) != -1) {
     switch (o) {
        // Long options
@@ -2452,6 +2542,7 @@ main(int argc, char **argv) {
             }
             break;
           case 1: usage(argv[0], 0); break;
+          case 5: pseudo_transparency = True; break;
           default:
             fprintf(stderr, "Bug, unhandeled longopt_idx %d\n", longopt_idx);
             exit(2);
@@ -2536,6 +2627,9 @@ main(int argc, char **argv) {
           fprintf(stderr, "Invalid active border color format: %s. Use #RRGGBB\n", optarg);
           exit(1);
         }
+        break;
+      case 'p':
+        pseudo_transparency = True;
         break;
       case 'n':
       case 's':

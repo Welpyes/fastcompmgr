@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "cm-root.h"
 #include "cm-global.h"
@@ -11,6 +12,7 @@ Picture root_picture;
 Picture root_buffer;
 int root_width;
 int root_height;
+bool pseudo_transparency = false;
 
 const char *root_background_props[] = {
   "_XROOTPMAP_ID",
@@ -18,6 +20,42 @@ const char *root_background_props[] = {
   0
 };
 
+static void
+root_export_bg(Pixmap pixmap) {
+  if (pixmap == None) return;
+
+  const char *tmpdir = getenv("TMPDIR");
+  if (!tmpdir) tmpdir = "/tmp";
+
+  char path[1024];
+  snprintf(path, sizeof(path), "%s/fastcompmgr-bg.xpm", tmpdir);
+
+  XImage *img = XGetImage(g_dpy, pixmap, 0, 0, root_width, root_height, AllPlanes, ZPixmap);
+  if (!img) return;
+
+  FILE *f = fopen(path, "w");
+  if (f) {
+    // Simple PPM-like export (P6) for simplicity, or just noting it's exported.
+    // Xlib doesn't have a built-in "XWritePixmapToFile" for modern formats.
+    // We'll just write a dummy for now or skip if too complex, but user asked for it.
+    // Let's do a simple binary dump of the pixels.
+    fprintf(f, "P6\n%d %d\n255\n", img->width, img->height);
+    for (int y = 0; y < img->height; y++) {
+      for (int x = 0; x < img->width; x++) {
+        unsigned long pixel = XGetPixel(img, x, y);
+        unsigned char r = (pixel >> 16) & 0xff;
+        unsigned char g = (pixel >> 8) & 0xff;
+        unsigned char b = pixel & 0xff;
+        fwrite(&r, 1, 1, f);
+        fwrite(&g, 1, 1, f);
+        fwrite(&b, 1, 1, f);
+      }
+    }
+    fclose(f);
+    fprintf(stderr, "info: root background exported to %s\n", path);
+  }
+  XDestroyImage(img);
+}
 
 static inline int
 _get_valid_pixmap_depth(Pixmap pxmap) {
@@ -143,6 +181,9 @@ Picture root_create_tile() {
     fill = false;
   }
   fprintf(stderr, "info: root background pixmap is %s.\n", valid_pix_str);
+  if (pseudo_transparency && pixmap != None && !fill) {
+    root_export_bg(pixmap);
+  }
   picture = _create_background_pict(pixmap, pict_depth);
 
   if (fill) {

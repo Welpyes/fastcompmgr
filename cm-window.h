@@ -92,6 +92,7 @@ typedef struct _win {
   Bool need_configure;
   bool configure_size_changed;
   XConfigureEvent queue_configure;
+  bool is_rofi;
 
   /* for drawing translucent windows */
   XserverRegion border_clip;
