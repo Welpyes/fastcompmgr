@@ -2608,27 +2608,22 @@ main(int argc, char **argv) {
     Pixmap pix = XCreatePixmap(dpy, root, size, size, 8);
     XRenderPictFormat *format = XRenderFindStandardFormat(dpy, PictStandardA8);
     corner_mask = XRenderCreatePicture(dpy, pix, format, 0, 0);
-    XRenderPictureAttributes pa;
-    pa.repeat = RepeatPad;
-    XRenderChangePicture(dpy, corner_mask, CPRepeat, &pa);
-    XRenderSetPictureFilter(dpy, corner_mask, FilterNearest, NULL, 0);
     XRenderColor c = {0, 0, 0, 0};
     XRenderFillRectangle(dpy, PictOpSrc, corner_mask, &c, 0, 0, size, size);
     for (int y = 0; y < size; y++) {
       for (int x = 0; x < size; x++) {
-        /* Use center of corner at (size-1, size-1) */
         double dx = (size - 1) - x;
         double dy = (size - 1) - y;
         double dist = sqrt(dx*dx + dy*dy);
         
         if (dist <= size - 1) {
           c.alpha = 0xffff;
-          XRenderFillRectangle(dpy, PictOpSrc, corner_mask, &c, x, y, 1, 1);
         } else if (dist < size) {
-          double alpha = 1.0 - (dist - (size - 1));
-          c.alpha = (unsigned short)(alpha * 0xffff);
-          XRenderFillRectangle(dpy, PictOpSrc, corner_mask, &c, x, y, 1, 1);
+          c.alpha = (unsigned short)((1.0 - (dist - (size - 1))) * 0xffff);
+        } else {
+          c.alpha = 0x0000;
         }
+        XRenderFillRectangle(dpy, PictOpSrc, corner_mask, &c, x, y, 1, 1);
       }
     }
     XFreePixmap(dpy, pix);
