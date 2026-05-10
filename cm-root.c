@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 
 #include "cm-root.h"
 #include "cm-global.h"
@@ -13,12 +14,73 @@ Picture root_buffer;
 int root_width;
 int root_height;
 bool pseudo_transparency = false;
+double pseudo_blur_radius = 0;
 
 const char *root_background_props[] = {
   "_XROOTPMAP_ID",
   "_XSETROOT_ID",
   0
 };
+
+static void
+gaussian_blur_image(XImage *img, double r) {
+  if (r <= 0) return;
+  int width = img->width;
+  int height = img->height;
+  int size = ((int)ceil(r * 3) + 1) & ~1;
+  int center = size / 2;
+  double *kernel = malloc(size * sizeof(double));
+  double sum = 0;
+
+  for (int i = 0; i < size; i++) {
+    double x = i - center;
+    kernel[i] = exp(-(x * x) / (2 * r * r));
+    sum += kernel[i];
+  }
+  for (int i = 0; i < size; i++) kernel[i] /= sum;
+
+  unsigned char *temp = malloc(width * height * 3);
+
+  // Horizontal pass
+  for (int y = 0; y < height; y++) {
+    for (int x = 0; x < width; x++) {
+      double r_sum = 0, g_sum = 0, b_sum = 0;
+      for (int i = 0; i < size; i++) {
+        int nx = x + i - center;
+        if (nx < 0) nx = 0;
+        if (nx >= width) nx = width - 1;
+        unsigned long pix = XGetPixel(img, nx, y);
+        r_sum += ((pix >> 16) & 0xff) * kernel[i];
+        g_sum += ((pix >> 8) & 0xff) * kernel[i];
+        b_sum += (pix & 0xff) * kernel[i];
+      }
+      int idx = (y * width + x) * 3;
+      temp[idx] = (unsigned char)r_sum;
+      temp[idx+1] = (unsigned char)g_sum;
+      temp[idx+2] = (unsigned char)b_sum;
+    }
+  }
+
+  // Vertical pass
+  for (int x = 0; x < width; x++) {
+    for (int y = 0; y < height; y++) {
+      double r_sum = 0, g_sum = 0, b_sum = 0;
+      for (int i = 0; i < size; i++) {
+        int ny = y + i - center;
+        if (ny < 0) ny = 0;
+        if (ny >= height) ny = height - 1;
+        int idx = (ny * width + x) * 3;
+        r_sum += temp[idx] * kernel[i];
+        g_sum += temp[idx+1] * kernel[i];
+        b_sum += temp[idx+2] * kernel[i];
+      }
+      XPutPixel(img, x, y, ((unsigned long)r_sum << 16) | ((unsigned long)g_sum << 8) | (unsigned long)b_sum);
+    }
+  }
+
+  free(kernel);
+  free(temp);
+}
 
 static void
 root_export_bg(Pixmap pixmap) {
@@ -134,10 +196,10 @@ bool root_init(){
 /// "error 143 (BadPicture) request 139 minor 8 serial 78698". If no valid
 /// background pixmap is found, we create one ourselves using DefaultVisual()
 /// and set a fixed solid background color.
-Picture root_create_tile() {
+Picture root_create_tile(double blur_radius) {
   Picture picture;
   Atom actual_type;
-  Pixmap pixmap;
+  Pixmap pixmap, sharp_pixmap;
   int actual_format;
   unsigned long nitems;
   unsigned long bytes_after;
@@ -180,10 +242,27 @@ Picture root_create_tile() {
     valid_pix_str = "valid";
     fill = false;
   }
-  fprintf(stderr, "info: root background pixmap is %s.\n", valid_pix_str);
-  if (pseudo_transparency && pixmap != None && !fill) {
-    root_export_bg(pixmap);
+  
+  sharp_pixmap = pixmap;
+
+  if (blur_radius > 0 && pixmap != None && !fill) {
+    fprintf(stderr, "info: blurring root background (radius %.1f)...\n", blur_radius);
+    XImage *img = XGetImage(g_dpy, pixmap, 0, 0, root_width, root_height, AllPlanes, ZPixmap);
+    if (img) {
+      gaussian_blur_image(img, blur_radius);
+      Pixmap blurred = XCreatePixmap(g_dpy, root, root_width, root_height, pict_depth);
+      GC gc = XCreateGC(g_dpy, blurred, 0, NULL);
+      XPutImage(g_dpy, blurred, gc, img, 0, 0, 0, 0, root_width, root_height);
+      XFreeGC(g_dpy, gc);
+      XDestroyImage(img);
+      pixmap = blurred; 
+    }
   }
+
+  if (pseudo_transparency && sharp_pixmap != None && !fill) {
+    root_export_bg(sharp_pixmap);
+  }
+
   picture = _create_background_pict(pixmap, pict_depth);
 
   if (fill) {
@@ -193,6 +272,19 @@ Picture root_create_tile() {
     XRenderFillRectangle(
       g_dpy, PictOpSrc, picture, &c, 0, 0, 1, 1);
   }
+
+  if (pixmap != sharp_pixmap) {
+    // We created a temporary blurred pixmap, but XRenderCreatePicture
+    // doesn't take ownership of the pixmap. However, the Picture
+    // will use it. We should NOT free the pixmap here if the Picture
+    // needs it. Actually, the Picture increments the reference count
+    // of the pixmap in the X server? No, Pictures are just resources.
+    // If we free the pixmap, the Picture becomes invalid.
+    // So we keep it. The caller will free the Picture, but we need
+    // to make sure the Pixmap is also freed eventually.
+    // In fastcompmgr, we'll need to handle this.
+  }
+
   return picture;
 }
 

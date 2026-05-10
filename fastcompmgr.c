@@ -64,6 +64,7 @@ Display *dpy;
 Picture black_picture;
 Picture cshadow_picture;
 Picture root_tile;
+Picture root_blur_tile = None;
 XserverRegion all_damage;
 XserverRegion g_xregion_tmp;
 Bool all_damage_is_dirty;
@@ -683,7 +684,7 @@ solid_picture(Display *dpy, Bool argb, double a,
 static void
 paint_root(Display *dpy) {
   if (!root_tile) {
-    root_tile = root_create_tile();
+    root_tile = root_create_tile(0);
   }
 
   XRenderComposite(
@@ -993,32 +994,45 @@ draw_border_overlay(Display *dpy, win *w, Picture dst, int x, int y, int wid, in
 static void
 draw_pseudo_transparency(Display *dpy, win *w, Picture alpha, Picture dst,
                          int x, int y, int wid, int hei) {
-  if (!pseudo_transparency || root_tile == None) return;
+  if (!pseudo_transparency) return;
+
+  if (pseudo_blur_radius > 0) {
+    if (root_blur_tile == None) {
+      root_blur_tile = root_create_tile(pseudo_blur_radius);
+    }
+  } else {
+    if (root_tile == None) {
+      root_tile = root_create_tile(0);
+    }
+  }
+
+  Picture tile = (pseudo_blur_radius > 0) ? root_blur_tile : root_tile;
+  if (tile == None) return;
 
   int size = corner_radius;
   if (size <= 0 || corner_mask == None) {
-    XRenderComposite(dpy, PictOpOver, root_tile, alpha, dst, x, y, 0, 0, x, y, wid, hei);
+    XRenderComposite(dpy, PictOpOver, tile, alpha, dst, x, y, 0, 0, x, y, wid, hei);
     return;
   }
 
   if (wid < size * 2) size = wid / 2;
   if (hei < size * 2) size = hei / 2;
   if (size <= 0) {
-    XRenderComposite(dpy, PictOpOver, root_tile, alpha, dst, x, y, 0, 0, x, y, wid, hei);
+    XRenderComposite(dpy, PictOpOver, tile, alpha, dst, x, y, 0, 0, x, y, wid, hei);
     return;
   }
 
   /* Body */
-  XRenderComposite(dpy, PictOpOver, root_tile, alpha, dst, x + size, y, 0, 0, x + size, y, wid - size * 2, size);
-  XRenderComposite(dpy, PictOpOver, root_tile, alpha, dst, x, y + size, 0, 0, x, y + size, wid, hei - size * 2);
-  XRenderComposite(dpy, PictOpOver, root_tile, alpha, dst, x + size, y + hei - size, 0, 0, x + size, y + hei - size, wid - size * 2, size);
+  XRenderComposite(dpy, PictOpOver, tile, alpha, dst, x + size, y, 0, 0, x + size, y, wid - size * 2, size);
+  XRenderComposite(dpy, PictOpOver, tile, alpha, dst, x, y + size, 0, 0, x, y + size, wid, hei - size * 2);
+  XRenderComposite(dpy, PictOpOver, tile, alpha, dst, x + size, y + hei - size, 0, 0, x + size, y + hei - size, wid - size * 2, size);
 
   /* Corners */
   if (alpha == None) {
-    XRenderComposite(dpy, PictOpOver, root_tile, corner_masks[0], dst, x, y, 0, 0, x, y, size, size);
-    XRenderComposite(dpy, PictOpOver, root_tile, corner_masks[1], dst, x + wid - size, y, 0, 0, x + wid - size, y, size, size);
-    XRenderComposite(dpy, PictOpOver, root_tile, corner_masks[2], dst, x, y + hei - size, 0, 0, x, y + hei - size, size, size);
-    XRenderComposite(dpy, PictOpOver, root_tile, corner_masks[3], dst, x + wid - size, y + hei - size, 0, 0, x + wid - size, y + hei - size, size, size);
+    XRenderComposite(dpy, PictOpOver, tile, corner_masks[0], dst, x, y, 0, 0, x, y, size, size);
+    XRenderComposite(dpy, PictOpOver, tile, corner_masks[1], dst, x + wid - size, y, 0, 0, x + wid - size, y, size, size);
+    XRenderComposite(dpy, PictOpOver, tile, corner_masks[2], dst, x, y + hei - size, 0, 0, x, y + hei - size, size, size);
+    XRenderComposite(dpy, PictOpOver, tile, corner_masks[3], dst, x + wid - size, y + hei - size, 0, 0, x + wid - size, y + hei - size, size, size);
   } else {
     /* TRANS windows with corners: use same logic as draw_rounded_window */
     XTransform xform = {{{ XDoubleToFixed(1), 0, 0 }, { 0, XDoubleToFixed(1), 0 }, { 0, 0, XDoubleToFixed(1) }}};
@@ -1026,13 +1040,13 @@ draw_pseudo_transparency(Display *dpy, win *w, Picture alpha, Picture dst,
     /* Top-left */
     XRenderComposite(dpy, PictOpSrc, corner_mask, alpha, corner_alpha_mask, 0, 0, 0, 0, 0, 0, size, size);
     XRenderSetPictureTransform(dpy, corner_alpha_mask, &xform);
-    XRenderComposite(dpy, PictOpOver, root_tile, corner_alpha_mask, dst, x, y, 0, 0, x, y, size, size);
+    XRenderComposite(dpy, PictOpOver, tile, corner_alpha_mask, dst, x, y, 0, 0, x, y, size, size);
 
     /* Top-right */
     xform.matrix[0][0] = XDoubleToFixed(-1);
     xform.matrix[0][2] = XDoubleToFixed(size);
     XRenderSetPictureTransform(dpy, corner_alpha_mask, &xform);
-    XRenderComposite(dpy, PictOpOver, root_tile, corner_alpha_mask, dst, x + wid - size, y, 0, 0, x + wid - size, y, size, size);
+    XRenderComposite(dpy, PictOpOver, tile, corner_alpha_mask, dst, x + wid - size, y, 0, 0, x + wid - size, y, size, size);
 
     /* Bottom-left */
     xform.matrix[0][0] = XDoubleToFixed(1);
@@ -1040,7 +1054,7 @@ draw_pseudo_transparency(Display *dpy, win *w, Picture alpha, Picture dst,
     xform.matrix[1][1] = XDoubleToFixed(-1);
     xform.matrix[1][2] = XDoubleToFixed(size);
     XRenderSetPictureTransform(dpy, corner_alpha_mask, &xform);
-    XRenderComposite(dpy, PictOpOver, root_tile, corner_alpha_mask, dst, x, y + hei - size, 0, 0, x, y + hei - size, size, size);
+    XRenderComposite(dpy, PictOpOver, tile, corner_alpha_mask, dst, x, y + hei - size, 0, 0, x, y + hei - size, size, size);
 
     /* Bottom-right */
     xform.matrix[0][0] = XDoubleToFixed(-1);
@@ -1048,10 +1062,9 @@ draw_pseudo_transparency(Display *dpy, win *w, Picture alpha, Picture dst,
     xform.matrix[1][1] = XDoubleToFixed(-1);
     xform.matrix[1][2] = XDoubleToFixed(size);
     XRenderSetPictureTransform(dpy, corner_alpha_mask, &xform);
-    XRenderComposite(dpy, PictOpOver, root_tile, corner_alpha_mask, dst, x + wid - size, y + hei - size, 0, 0, x + wid - size, y + hei - size, size, size);
+    XRenderComposite(dpy, PictOpOver, tile, corner_alpha_mask, dst, x + wid - size, y + hei - size, 0, 0, x + wid - size, y + hei - size, size, size);
   }
 }
-
 static void
 draw_rounded_window(Display *dpy, int op, win *w, Picture alpha, Picture dst,
                     int x, int y, int wid, int hei) {
@@ -2378,6 +2391,8 @@ usage(char *program, int exitcode) {
     Color of active window borders in #RRGGBB format.
     -p
     Enable pseudo-transparency using the root background.
+    --blur radius
+    Radius for blurring the pseudo-transparency background.
     -S
     Enable synchronous operation (for debugging).
     --shadow-color "#RRGGBB"
@@ -2498,6 +2513,7 @@ main(int argc, char **argv) {
     { "border-color", required_argument, NULL, 'b' },
     { "active-border-color", required_argument, NULL, 'a' },
     { "pseudo-transparency", no_argument, NULL, 'p' },
+    { "blur", required_argument, NULL, 'B' },
     { 0, 0, 0, 0 },
   };
 
@@ -2529,7 +2545,7 @@ main(int argc, char **argv) {
     win_type_opacity[i] = 1.0;
   }
 
-  while ((o = getopt_long(argc, argv, "D:I:O:d:r:o:m:l:t:i:e:schnfFCSR:b:a:p",
+  while ((o = getopt_long(argc, argv, "D:I:O:d:r:o:m:l:t:i:e:schnfFCSR:b:a:pB:",
                           longopt, &longopt_idx)) != -1) {
     switch (o) {
        // Long options
@@ -2543,6 +2559,7 @@ main(int argc, char **argv) {
             break;
           case 1: usage(argv[0], 0); break;
           case 5: pseudo_transparency = True; break;
+          case 6: pseudo_blur_radius = atof(optarg); break;
           default:
             fprintf(stderr, "Bug, unhandeled longopt_idx %d\n", longopt_idx);
             exit(2);
@@ -2630,6 +2647,9 @@ main(int argc, char **argv) {
         break;
       case 'p':
         pseudo_transparency = True;
+        break;
+      case 'B':
+        pseudo_blur_radius = atof(optarg);
         break;
       case 'n':
       case 's':
@@ -3054,8 +3074,12 @@ main(int argc, char **argv) {
                 XClearArea(dpy, root, 0, 0, 0, 0, True);
                 XRenderFreePicture(dpy, root_tile);
                 root_tile = None;
-                break;
               }
+              if (root_blur_tile) {
+                XRenderFreePicture(dpy, root_blur_tile);
+                root_blur_tile = None;
+              }
+              if (!root_tile) break; // If we freed something, stop loop
             }
           }
           // if (ev.xproperty.atom == atom_net_active_window) {
