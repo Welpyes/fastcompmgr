@@ -2579,11 +2579,12 @@ main(int argc, char **argv) {
     for (int y = 0; y < size; y++) {
       for (int x = 0; x < size; x++) {
         double dist = sqrt(pow(size - 1 - x, 2) + pow(size - 1 - y, 2));
-        if (dist > size) {
+        if (dist >= size) {
           XRenderFillRectangle(dpy, PictOpSrc, corner_mask, &c, x, y, 1, 1);
         } else if (dist > size - 1) {
           c.alpha = (dist - (size - 1)) * 0xffff;
           XRenderFillRectangle(dpy, PictOpSrc, corner_mask, &c, x, y, 1, 1);
+          c.alpha = 0xffff;
         }
       }
     }
