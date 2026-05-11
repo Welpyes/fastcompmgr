@@ -29,6 +29,125 @@ const char *root_background_props[] = {
 
 #ifdef HAVE_VIPS
 static int
+libvips_adjust_image(XImage *img, double brightness, double saturation) {
+  static bool vips_initialized = false;
+  if (!vips_initialized) {
+    if (vips_init("fastcompmgr")) return -1;
+    vips_initialized = true;
+  }
+
+  VipsImage *vips_in = NULL;
+  VipsImage *vips_out = NULL;
+  VipsImage *vips_tmp = NULL;
+  VipsImage *alpha = NULL;
+  void *data = img->data;
+  int width = img->width;
+  int height = img->height;
+  int bpp = img->bits_per_pixel / 8;
+  int bands = (img->bits_per_pixel == 32) ? 4 : 3;
+
+  vips_in = vips_image_new_from_memory(data, (size_t)width * height * bpp,
+                                      width, height, bands, VIPS_FORMAT_UCHAR);
+  if (!vips_in) return -1;
+
+  vips_out = vips_in;
+  g_object_ref(vips_out);
+
+  if (bands == 4) {
+      VipsImage *rgb = NULL;
+      if (vips_extract_band(vips_out, &rgb, 0, "n", 3, NULL) ||
+          vips_extract_band(vips_out, &alpha, 3, "n", 1, NULL)) {
+          if (rgb) g_object_unref(rgb);
+          goto error;
+      }
+      g_object_unref(vips_out);
+      vips_out = rgb;
+  }
+
+  // Apply brightness (linear scaling)
+  if (brightness != 1.0) {
+    if (vips_linear1(vips_out, &vips_tmp, brightness, 0, NULL)) {
+      goto error;
+    }
+    g_object_unref(vips_out);
+    vips_out = vips_tmp;
+    vips_tmp = NULL;
+  }
+
+  // Apply saturation
+  if (saturation != 1.0) {
+    VipsImage *lab = NULL;
+    VipsImage *saturated = NULL;
+    VipsImage *srgb = NULL;
+
+    if (vips_colourspace(vips_out, &lab, VIPS_INTERPRETATION_LAB, NULL)) {
+      goto error;
+    }
+    
+    double multiplier[] = {1.0, saturation, saturation};
+    double offset[] = {0.0, 0.0, 0.0};
+    if (vips_linear(lab, &saturated, multiplier, offset, 3, NULL)) {
+      if (lab) g_object_unref(lab);
+      goto error;
+    }
+
+    if (vips_colourspace(saturated, &srgb, VIPS_INTERPRETATION_sRGB, NULL)) {
+      if (lab) g_object_unref(lab);
+      if (saturated) g_object_unref(saturated);
+      goto error;
+    }
+
+    g_object_unref(vips_out);
+    vips_out = srgb;
+    g_object_unref(lab);
+    g_object_unref(saturated);
+  }
+
+  if (alpha) {
+      if (vips_bandjoin2(vips_out, alpha, &vips_tmp, NULL)) {
+          goto error;
+      }
+      g_object_unref(vips_out);
+      g_object_unref(alpha);
+      alpha = NULL;
+      vips_out = vips_tmp;
+      vips_tmp = NULL;
+  }
+
+  // Final cast to UCHAR
+  VipsImage *final = NULL;
+  if (vips_cast(vips_out, &final, VIPS_FORMAT_UCHAR, NULL)) {
+      goto error;
+  }
+  g_object_unref(vips_out);
+  vips_out = final;
+
+  size_t size;
+  void *out_data = vips_image_write_to_memory(vips_out, &size);
+  if (out_data) {
+    size_t expected_size = (size_t)width * height * bpp;
+    if (size <= expected_size) {
+        memcpy(data, out_data, size);
+    } else {
+        fprintf(stderr, "error: libvips output size mismatch: %zu > %zu\n", size, expected_size);
+        memcpy(data, out_data, expected_size);
+    }
+    g_free(out_data);
+  }
+
+  g_object_unref(vips_in);
+  g_object_unref(vips_out);
+  return 0;
+
+error:
+  if (vips_in) g_object_unref(vips_in);
+  if (vips_out) g_object_unref(vips_out);
+  if (vips_tmp) g_object_unref(vips_tmp);
+  if (alpha) g_object_unref(alpha);
+  return -1;
+}
+
+static int
 libvips_blur_image(XImage *img, double r) {
   static bool vips_initialized = false;
   if (!vips_initialized) {
@@ -52,10 +171,26 @@ libvips_blur_image(XImage *img, double r) {
     return -1;
   }
 
+  VipsImage *final;
+  if (vips_cast(vips_out, &final, VIPS_FORMAT_UCHAR, NULL)) {
+      g_object_unref(vips_in);
+      g_object_unref(vips_out);
+      return -1;
+  }
+  g_object_unref(vips_out);
+  vips_out = final;
+
   size_t size;
   void *out_data = vips_image_write_to_memory(vips_out, &size);
   if (out_data) {
-    memcpy(data, out_data, size);
+    int bpp = img->bits_per_pixel / 8;
+    size_t expected_size = (size_t)width * height * bpp;
+    if (size <= expected_size) {
+        memcpy(data, out_data, size);
+    } else {
+        fprintf(stderr, "error: libvips output size mismatch: %zu > %zu\n", size, expected_size);
+        memcpy(data, out_data, expected_size);
+    }
     g_free(out_data);
   }
 
@@ -366,7 +501,7 @@ bool root_init(){
 /// "error 143 (BadPicture) request 139 minor 8 serial 78698". If no valid
 /// background pixmap is found, we create one ourselves using DefaultVisual()
 /// and set a fixed solid background color.
-Picture root_create_tile(double blur_radius) {
+Picture root_create_tile(double blur_radius, double brightness, double saturation) {
   Picture picture;
   Atom actual_type;
   Pixmap pixmap, sharp_pixmap;
@@ -412,19 +547,31 @@ Picture root_create_tile(double blur_radius) {
   
   sharp_pixmap = pixmap;
 
-  if (blur_radius > 0 && pixmap != None && !fill) {
-    fprintf(stderr, "info: blurring root background (radius %.1f)...\n", blur_radius);
+  if ((blur_radius > 0 || brightness != 1.0 || saturation != 1.0) && pixmap != None && !fill) {
+    if (blur_radius > 0)
+        fprintf(stderr, "info: blurring root background (radius %.1f)...\n", blur_radius);
+    if (brightness != 1.0 || saturation != 1.0)
+        fprintf(stderr, "info: adjusting background (brightness %.2f, saturation %.2f)...\n", brightness, saturation);
+
     XImage *img = XGetImage(g_dpy, pixmap, 0, 0, root_width, root_height, AllPlanes, ZPixmap);
     if (img) {
-      gaussian_blur_image(img, blur_radius);
+      if (blur_radius > 0) {
+        gaussian_blur_image(img, blur_radius);
+      }
+  #ifdef HAVE_VIPS
+      if (brightness != 1.0 || saturation != 1.0) {
+        libvips_adjust_image(img, brightness, saturation);
+      }
+  #endif
       Pixmap blurred = XCreatePixmap(g_dpy, root, root_width, root_height, pict_depth);
       GC gc = XCreateGC(g_dpy, blurred, 0, NULL);
       XPutImage(g_dpy, blurred, gc, img, 0, 0, 0, 0, root_width, root_height);
       XFreeGC(g_dpy, gc);
+      pixmap = blurred;
       XDestroyImage(img);
-      pixmap = blurred; 
     }
   }
+
 
   if (pseudo_transparency && sharp_pixmap != None && !fill) {
     root_export_bg(sharp_pixmap);

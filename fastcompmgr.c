@@ -132,7 +132,11 @@ int fade_time = 0;
 Bool fade_trans = False;
 
 double inactive_opacity = 0;
+double inactive_dim = 0.0;
 double frame_opacity = 0;
+double pseudo_bg_brightness = 1.0;
+double pseudo_bg_saturation = 1.0;
+Picture dim_alpha_pict = None;
 int corner_radius = 0;
 Picture corner_mask = None;
 static Picture corner_masks[4] = {None, None, None, None};
@@ -684,7 +688,7 @@ solid_picture(Display *dpy, Bool argb, double a,
 static void
 paint_root(Display *dpy) {
   if (!root_tile) {
-    root_tile = root_create_tile(0);
+    root_tile = root_create_tile(0, 1.0, 1.0);
   }
 
   XRenderComposite(
@@ -996,13 +1000,13 @@ draw_pseudo_transparency(Display *dpy, win *w, Picture alpha, Picture dst,
                          int x, int y, int wid, int hei) {
   if (!pseudo_transparency) return;
 
-  if (pseudo_blur_radius > 0) {
+  if (pseudo_blur_radius > 0 || pseudo_bg_brightness != 1.0 || pseudo_bg_saturation != 1.0) {
     if (root_blur_tile == None) {
-      root_blur_tile = root_create_tile(pseudo_blur_radius);
+      root_blur_tile = root_create_tile(pseudo_blur_radius, pseudo_bg_brightness, pseudo_bg_saturation);
     }
   } else {
     if (root_tile == None) {
-      root_tile = root_create_tile(0);
+      root_tile = root_create_tile(0, 1.0, 1.0);
     }
   }
 
@@ -1065,6 +1069,45 @@ draw_pseudo_transparency(Display *dpy, win *w, Picture alpha, Picture dst,
     XRenderComposite(dpy, PictOpOver, tile, corner_alpha_mask, dst, x + wid - size, y + hei - size, 0, 0, x + wid - size, y + hei - size, size, size);
   }
 }
+static void
+draw_dim_overlay(Display *dpy, win *w, Picture dst, int x, int y, int wid, int hei) {
+  if (inactive_dim <= 0 || dim_alpha_pict == None || w->id == active_win) return;
+  if (w->window_type == WINTYPE_DESKTOP) return;
+
+  int size = (IS_NORMAL_WIN(w) && !w->is_rofi) ? corner_radius : 0;
+  if (size <= 0 || corner_mask == None) {
+    XRenderComposite(dpy, PictOpOver, black_picture, dim_alpha_pict, dst, 0, 0, 0, 0, x, y, wid, hei);
+    return;
+  }
+
+  if (wid < size * 2) size = wid / 2;
+  if (hei < size * 2) size = hei / 2;
+  if (size <= 0) {
+    XRenderComposite(dpy, PictOpOver, black_picture, dim_alpha_pict, dst, 0, 0, 0, 0, x, y, wid, hei);
+    return;
+  }
+
+  /* 3 Rects for body */
+  XRenderComposite(dpy, PictOpOver, black_picture, dim_alpha_pict, dst, 0, 0, 0, 0, x + size, y, wid - size * 2, size);
+  XRenderComposite(dpy, PictOpOver, black_picture, dim_alpha_pict, dst, 0, 0, 0, 0, x, y + size, wid, hei - size * 2);
+  XRenderComposite(dpy, PictOpOver, black_picture, dim_alpha_pict, dst, 0, 0, 0, 0, x + size, y + hei - size, wid - size * 2, size);
+
+  /* 4 Corners using same mask but combined with dim_alpha_pict */
+  /* We can't easily combine two masks in one XRenderComposite call without a temporary.
+     But since dim_alpha_pict is a solid color, we can just use the corner_mask as the mask
+     and a dimmed black picture as the source. */
+  static Picture dimmed_black = None;
+  if (dimmed_black == None) {
+      dimmed_black = solid_picture(dpy, True, inactive_dim, 0, 0, 0);
+  }
+  // TODO: update dimmed_black if inactive_dim changes (unlikely during runtime here)
+
+  XRenderComposite(dpy, PictOpOver, dimmed_black, corner_masks[0], dst, 0, 0, 0, 0, x, y, size, size);
+  XRenderComposite(dpy, PictOpOver, dimmed_black, corner_masks[1], dst, 0, 0, 0, 0, x + wid - size, y, size, size);
+  XRenderComposite(dpy, PictOpOver, dimmed_black, corner_masks[2], dst, 0, 0, 0, 0, x, y + hei - size, size, size);
+  XRenderComposite(dpy, PictOpOver, dimmed_black, corner_masks[3], dst, 0, 0, 0, 0, x + wid - size, y + hei - size, size, size);
+}
+
 static void
 draw_rounded_window(Display *dpy, int op, win *w, Picture alpha, Picture dst,
                     int x, int y, int wid, int hei) {
@@ -1277,6 +1320,7 @@ paint_all(Display *dpy, XserverRegion region) {
       XFixesSubtractRegion(dpy, region, region, w->border_size);
 
       draw_rounded_window(dpy, PictOpSrc, w, None, root_buffer, x, y, wid, hei);
+      draw_dim_overlay(dpy, w, root_buffer, x, y, wid, hei);
     }
 
     XFixesCopyRegion(dpy, w->border_clip, region);
@@ -1375,6 +1419,7 @@ paint_all(Display *dpy, XserverRegion region) {
 
         draw_border_overlay(dpy, w, root_buffer, x, y, wid, hei);
       }
+      draw_dim_overlay(dpy, w, root_buffer, x, y, wid, hei);
     }
   }
 
@@ -2395,6 +2440,12 @@ usage(char *program, int exitcode) {
     Enable pseudo-transparency using the root background.
     --blur radius
     Radius for blurring the pseudo-transparency background.
+    --inactive-dim opacity
+    Dimming opacity for inactive windows (0.0 - 1.0).
+    --bg-brightness factor
+    Brightness factor for the blurred background.
+    --bg-saturation factor
+    Saturation factor for the blurred background.
     -S
     Enable synchronous operation (for debugging).
     --shadow-color "#RRGGBB"
@@ -2516,6 +2567,9 @@ main(int argc, char **argv) {
     { "active-border-color", required_argument, NULL, 'a' },
     { "pseudo-transparency", no_argument, NULL, 'p' },
     { "blur", required_argument, NULL, 'B' },
+    { "inactive-dim", required_argument, NULL, 0 },
+    { "bg-brightness", required_argument, NULL, 0 },
+    { "bg-saturation", required_argument, NULL, 0 },
     { 0, 0, 0, 0 },
   };
 
@@ -2562,6 +2616,9 @@ main(int argc, char **argv) {
           case 1: usage(argv[0], 0); break;
           case 5: pseudo_transparency = True; break;
           case 6: pseudo_blur_radius = atof(optarg); break;
+          case 7: inactive_dim = atof(optarg); break;
+          case 8: pseudo_bg_brightness = atof(optarg); break;
+          case 9: pseudo_bg_saturation = atof(optarg); break;
           default:
             fprintf(stderr, "Bug, unhandeled longopt_idx %d\n", longopt_idx);
             exit(2);
@@ -2775,6 +2832,10 @@ main(int argc, char **argv) {
   black_picture = solid_picture(dpy, True, 1, 0, 0, 0);
   border_picture = solid_picture(dpy, True, 1, border_red, border_green, border_blue);
   active_border_picture = solid_picture(dpy, True, 1, active_border_red, active_border_green, active_border_blue);
+
+  if (inactive_dim > 0) {
+    dim_alpha_pict = solid_picture(dpy, False, inactive_dim, 0, 0, 0);
+  }
 
   border_color_x.alpha = 0xffff;
   border_color_x.red = border_red * 0xffff;

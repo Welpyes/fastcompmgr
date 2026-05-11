@@ -13,7 +13,9 @@ extern int root_height;
 extern const char *root_background_props[];
 extern bool pseudo_transparency;
 extern double pseudo_blur_radius;
+extern double pseudo_bg_brightness;
+extern double pseudo_bg_saturation;
 
 
 bool root_init();
-Picture root_create_tile(double blur_radius);
+Picture root_create_tile(double blur_radius, double brightness, double saturation);
