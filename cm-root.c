@@ -378,7 +378,6 @@ Picture root_create_tile(double blur_radius) {
   bool fill;
   int p;
   int res;
-  const char* valid_pix_str;
 
   pixmap = None;
 
@@ -405,11 +404,9 @@ Picture root_create_tile(double blur_radius) {
   }
 
   if(pixmap == None){
-    valid_pix_str = "invalid";
     pixmap = XCreatePixmap(g_dpy, root, 1, 1, DefaultDepth(g_dpy, g_screen));
     fill = true;
   } else {
-    valid_pix_str = "valid";
     fill = false;
   }
   

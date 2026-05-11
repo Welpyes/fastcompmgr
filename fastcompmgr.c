@@ -1254,7 +1254,8 @@ paint_all(Display *dpy, XserverRegion region) {
       win_extents(dpy, w);
     }
 
-    if (w->mode == WINDOW_SOLID && !HAS_FRAME_OPACITY(w)) {
+    if (w->mode == WINDOW_SOLID && !HAS_FRAME_OPACITY(w) &&
+        (w->window_type != WINTYPE_NORMAL || w->is_rofi || corner_radius <= 0)) {
       int x, y, wid, hei;
 
 #if HAS_NAME_WINDOW_PIXMAP
@@ -1314,7 +1315,8 @@ paint_all(Display *dpy, XserverRegion region) {
         dpy, False, frame_opacity, 0, 0, 0);
     }
 
-    if (w->mode != WINDOW_SOLID || HAS_FRAME_OPACITY(w)) {
+    if (w->mode != WINDOW_SOLID || HAS_FRAME_OPACITY(w) ||
+        (w->window_type == WINTYPE_NORMAL && !w->is_rofi && corner_radius > 0)) {
       int x, y, wid, hei;
 
       // 2024-11-26: Without the next two lines, the Microsoft-Teams screen-share
