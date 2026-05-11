@@ -22,64 +22,234 @@ const char *root_background_props[] = {
   0
 };
 
+#ifdef HAVE_VIPS
+#include <vips/vips.h>
+#endif
+#include <time.h>
+
+#ifdef HAVE_VIPS
+static int
+libvips_blur_image(XImage *img, double r) {
+  static bool vips_initialized = false;
+  if (!vips_initialized) {
+    if (vips_init("fastcompmgr")) return -1;
+    vips_initialized = true;
+  }
+
+  VipsImage *vips_in;
+  VipsImage *vips_out;
+  void *data = img->data;
+  int width = img->width;
+  int height = img->height;
+  int bands = (img->bits_per_pixel == 32) ? 4 : 3;
+
+  vips_in = vips_image_new_from_memory(data, width * height * (img->bits_per_pixel / 8),
+                                      width, height, bands, VIPS_FORMAT_UCHAR);
+  if (!vips_in) return -1;
+
+  if (vips_gaussblur(vips_in, &vips_out, r, NULL)) {
+    g_object_unref(vips_in);
+    return -1;
+  }
+
+  size_t size;
+  void *out_data = vips_image_write_to_memory(vips_out, &size);
+  if (out_data) {
+    memcpy(data, out_data, size);
+    g_free(out_data);
+  }
+
+  g_object_unref(vips_in);
+  g_object_unref(vips_out);
+  return 0;
+}
+#endif
+
+/* StackBlur algorithm by Mario Klingemann */
+static void
+stack_blur_image(XImage *img, double r) {
+  int radius = (int)r;
+  if (radius < 1) return;
+
+  int width = img->width;
+  int height = img->height;
+  int bpp = img->bits_per_pixel / 8;
+  unsigned char *data = (unsigned char *)img->data;
+
+  int div = radius + radius + 1;
+  int *dv = malloc(256 * div * sizeof(int));
+  for (int i = 0; i < 256 * div; i++) dv[i] = i / div;
+
+  int *stack = malloc(div * 3 * sizeof(int));
+  int x, y, i, p, stackptr, stackstart, r_sum, g_sum, b_sum, r_in_sum, g_in_sum, b_in_sum, r_out_sum, g_out_sum, b_out_sum;
+  int *sir;
+
+  for (y = 0; y < height; y++) {
+    r_in_sum = g_in_sum = b_in_sum = r_out_sum = g_out_sum = b_out_sum = r_sum = g_sum = b_sum = 0;
+    for (i = -radius; i <= radius; i++) {
+      p = (y * width + (i < 0 ? 0 : (i >= width ? width - 1 : i))) * bpp;
+      sir = &stack[(i + radius) * 3];
+      sir[0] = data[p + 2];
+      sir[1] = data[p + 1];
+      sir[2] = data[p];
+      int rbs = radius + 1 - abs(i);
+      r_sum += sir[0] * rbs;
+      g_sum += sir[1] * rbs;
+      b_sum += sir[2] * rbs;
+      if (i > 0) {
+        r_in_sum += sir[0];
+        g_in_sum += sir[1];
+        b_in_sum += sir[2];
+      } else {
+        r_out_sum += sir[0];
+        g_out_sum += sir[1];
+        b_out_sum += sir[2];
+      }
+    }
+    stackptr = radius;
+
+    for (x = 0; x < width; x++) {
+      data[(y * width + x) * bpp + 2] = dv[r_sum];
+      data[(y * width + x) * bpp + 1] = dv[g_sum];
+      data[(y * width + x) * bpp] = dv[b_sum];
+
+      r_sum -= r_out_sum;
+      g_sum -= g_out_sum;
+      b_sum -= b_out_sum;
+
+      stackstart = stackptr - radius + div;
+      sir = &stack[(stackstart % div) * 3];
+
+      r_out_sum -= sir[0];
+      g_out_sum -= sir[1];
+      b_out_sum -= sir[2];
+
+      if (x == 0) {
+        for (i = 0; i < radius; i++) {
+          sir = &stack[((x + i + 1) % div) * 3]; // this is not quite right for edge, but following common stackblur
+        }
+      }
+      p = (y * width + ((p = x + radius + 1) < width ? p : width - 1)) * bpp;
+
+      sir = &stack[(stackptr % div) * 3];
+      sir[0] = data[p + 2];
+      sir[1] = data[p + 1];
+      sir[2] = data[p];
+
+      r_in_sum += sir[0];
+      g_in_sum += sir[1];
+      b_in_sum += sir[2];
+
+      r_sum += r_in_sum;
+      g_sum += g_in_sum;
+      b_sum += b_in_sum;
+
+      stackptr = (stackptr + 1) % div;
+      sir = &stack[(stackptr % div) * 3];
+
+      r_out_sum += sir[0];
+      g_out_sum += sir[1];
+      b_out_sum += sir[2];
+
+      r_in_sum -= sir[0];
+      g_in_sum -= sir[1];
+      b_in_sum -= sir[2];
+    }
+  }
+
+  for (x = 0; x < width; x++) {
+    r_in_sum = g_in_sum = b_in_sum = r_out_sum = g_out_sum = b_out_sum = r_sum = g_sum = b_sum = 0;
+    for (i = -radius; i <= radius; i++) {
+      p = ((i < 0 ? 0 : (i >= height ? height - 1 : i)) * width + x) * bpp;
+      sir = &stack[(i + radius) * 3];
+      sir[0] = data[p + 2];
+      sir[1] = data[p + 1];
+      sir[2] = data[p];
+      int rbs = radius + 1 - abs(i);
+      r_sum += sir[0] * rbs;
+      g_sum += sir[1] * rbs;
+      b_sum += sir[2] * rbs;
+      if (i > 0) {
+        r_in_sum += sir[0];
+        g_in_sum += sir[1];
+        b_in_sum += sir[2];
+      } else {
+        r_out_sum += sir[0];
+        g_out_sum += sir[1];
+        b_out_sum += sir[2];
+      }
+    }
+    stackptr = radius;
+
+    for (y = 0; y < height; y++) {
+      data[(y * width + x) * bpp + 2] = dv[r_sum];
+      data[(y * width + x) * bpp + 1] = dv[g_sum];
+      data[(y * width + x) * bpp] = dv[b_sum];
+
+      r_sum -= r_out_sum;
+      g_sum -= g_out_sum;
+      b_sum -= b_out_sum;
+
+      stackstart = stackptr - radius + div;
+      sir = &stack[(stackstart % div) * 3];
+
+      r_out_sum -= sir[0];
+      g_out_sum -= sir[1];
+      b_out_sum -= sir[2];
+
+      p = (((p = y + radius + 1) < height ? p : height - 1) * width + x) * bpp;
+
+      sir = &stack[(stackptr % div) * 3];
+      sir[0] = data[p + 2];
+      sir[1] = data[p + 1];
+      sir[2] = data[p];
+
+      r_in_sum += sir[0];
+      g_in_sum += sir[1];
+      b_in_sum += sir[2];
+
+      r_sum += r_in_sum;
+      g_sum += g_in_sum;
+      b_sum += b_in_sum;
+
+      stackptr = (stackptr + 1) % div;
+      sir = &stack[(stackptr % div) * 3];
+
+      r_out_sum += sir[0];
+      g_out_sum += sir[1];
+      b_out_sum += sir[2];
+
+      r_in_sum -= sir[0];
+      g_in_sum -= sir[1];
+      b_in_sum -= sir[2];
+    }
+  }
+
+  free(dv);
+  free(stack);
+}
+
 static void
 gaussian_blur_image(XImage *img, double r) {
   if (r <= 0) return;
-  int width = img->width;
-  int height = img->height;
-  int size = ((int)ceil(r * 3) + 1) & ~1;
-  int center = size / 2;
-  double *kernel = malloc(size * sizeof(double));
-  double sum = 0;
 
-  for (int i = 0; i < size; i++) {
-    double x = i - center;
-    kernel[i] = exp(-(x * x) / (2 * r * r));
-    sum += kernel[i];
+  struct timespec start, end;
+  clock_gettime(CLOCK_MONOTONIC, &start);
+
+#ifdef HAVE_VIPS
+  if (libvips_blur_image(img, r) == 0) {
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    double diff = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    fprintf(stderr, "info: libvips blur took %.4f seconds\n", diff);
+    return;
   }
-  for (int i = 0; i < size; i++) kernel[i] /= sum;
+  fprintf(stderr, "warn: libvips blur failed, falling back to stackblur\n");
+#endif
 
-  unsigned char *temp = malloc(width * height * 3);
-
-  // Horizontal pass
-  for (int y = 0; y < height; y++) {
-    for (int x = 0; x < width; x++) {
-      double r_sum = 0, g_sum = 0, b_sum = 0;
-      for (int i = 0; i < size; i++) {
-        int nx = x + i - center;
-        if (nx < 0) nx = 0;
-        if (nx >= width) nx = width - 1;
-        unsigned long pix = XGetPixel(img, nx, y);
-        r_sum += ((pix >> 16) & 0xff) * kernel[i];
-        g_sum += ((pix >> 8) & 0xff) * kernel[i];
-        b_sum += (pix & 0xff) * kernel[i];
-      }
-      int idx = (y * width + x) * 3;
-      temp[idx] = (unsigned char)r_sum;
-      temp[idx+1] = (unsigned char)g_sum;
-      temp[idx+2] = (unsigned char)b_sum;
-    }
-  }
-
-  // Vertical pass
-  for (int x = 0; x < width; x++) {
-    for (int y = 0; y < height; y++) {
-      double r_sum = 0, g_sum = 0, b_sum = 0;
-      for (int i = 0; i < size; i++) {
-        int ny = y + i - center;
-        if (ny < 0) ny = 0;
-        if (ny >= height) ny = height - 1;
-        int idx = (ny * width + x) * 3;
-        r_sum += temp[idx] * kernel[i];
-        g_sum += temp[idx+1] * kernel[i];
-        b_sum += temp[idx+2] * kernel[i];
-      }
-      XPutPixel(img, x, y, ((unsigned long)r_sum << 16) | ((unsigned long)g_sum << 8) | (unsigned long)b_sum);
-    }
-  }
-
-  free(kernel);
-  free(temp);
+  stack_blur_image(img, r);
+  clock_gettime(CLOCK_MONOTONIC, &end);
+  double diff = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+  fprintf(stderr, "info: stackblur took %.4f seconds\n", diff);
 }
 
 static void

@@ -1,7 +1,14 @@
 PACKAGES = x11 xcomposite xfixes xdamage xrender
+VIPS_EXISTS := $(shell pkg-config --exists vips && echo yes)
+
+ifeq ($(VIPS_EXISTS),yes)
+    PACKAGES += vips
+    CFLAGS += -DHAVE_VIPS
+endif
+
 LIBS = `pkg-config --libs ${PACKAGES}` -lm
 INCS = `pkg-config --cflags ${PACKAGES}`
-CFLAGS = -Wall -O3 -flto
+CFLAGS += -Wall -O3 -flto
 PREFIX = /usr/local
 MANDIR = ${PREFIX}/share/man/man1
 
