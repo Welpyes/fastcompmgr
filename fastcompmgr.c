@@ -138,6 +138,7 @@ double pseudo_bg_brightness = 1.0;
 double pseudo_bg_saturation = 1.0;
 Picture dim_alpha_pict = None;
 int corner_radius = 0;
+int border_width_custom = 2;
 Picture corner_mask = None;
 static Picture corner_masks[4] = {None, None, None, None};
 static Picture border_masks[4] = {None, None, None, None};
@@ -977,7 +978,7 @@ draw_border_overlay(Display *dpy, win *w, Picture dst, int x, int y, int wid, in
   if (border_src == None) return;
 
   int size = corner_radius;
-  int b_width = 2;
+  int b_width = border_width_custom;
 
   /* Batch 4 Straight edges into one GPU command */
   XRectangle rects[4] = {
@@ -2446,6 +2447,8 @@ usage(char *program, int exitcode) {
     Brightness factor for the blurred background.
     --bg-saturation factor
     Saturation factor for the blurred background.
+    -w border-width
+    The thickness of window borders. (default 2)
     -S
     Enable synchronous operation (for debugging).
     --shadow-color "#RRGGBB"
@@ -2570,9 +2573,9 @@ main(int argc, char **argv) {
     { "inactive-dim", required_argument, NULL, 0 },
     { "bg-brightness", required_argument, NULL, 0 },
     { "bg-saturation", required_argument, NULL, 0 },
+    { "border-width", required_argument, NULL, 'w' },
     { 0, 0, 0, 0 },
-  };
-
+    };
   XEvent ev;
   Window root_return, parent_return;
   Window *children;
@@ -2601,7 +2604,7 @@ main(int argc, char **argv) {
     win_type_opacity[i] = 1.0;
   }
 
-  while ((o = getopt_long(argc, argv, "D:I:O:d:r:o:m:l:t:i:e:schnfFCSR:b:a:pB:",
+  while ((o = getopt_long(argc, argv, "D:I:O:d:r:o:m:l:t:i:e:schnfFCSR:b:a:pB:w:",
                           longopt, &longopt_idx)) != -1) {
     switch (o) {
        // Long options
@@ -2709,6 +2712,9 @@ main(int argc, char **argv) {
         break;
       case 'B':
         pseudo_blur_radius = atof(optarg);
+        break;
+      case 'w':
+        border_width_custom = atoi(optarg);
         break;
       case 'n':
       case 's':
@@ -2854,7 +2860,7 @@ main(int argc, char **argv) {
 
   if (corner_radius > 0) {
     int size = corner_radius;
-    int b_width = 2; /* Hardcoded 2px border for now */
+    int b_width = border_width_custom;
     XRenderPictFormat *format = XRenderFindStandardFormat(dpy, PictStandardA8);
     if (!format) {
       fprintf(stderr, "Error: Standard A8 format not found\n");
